@@ -7,8 +7,10 @@
   const app = document.getElementById('app');
 
   // ---------- Хранилище ----------
+  // Всё (ответы, фото, место, где остановился) лежит в localStorage
+  // и сохраняется на каждый ввод — можно закрыть вкладку и вернуться.
 
-  const emptyState = () => ({ profile: { name: '', born: '', city: '', gender: 'm' }, answers: {}, photos: {} });
+  const emptyState = () => ({ profile: { name: '', born: '', city: '', gender: 'm' }, answers: {}, photos: {}, last: null, updatedAt: null });
 
   function loadState() {
     try {
@@ -22,6 +24,7 @@
   let state = loadState();
 
   function save() {
+    state.updatedAt = Date.now();
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
       flashSaved();
@@ -32,6 +35,11 @@
     }
   }
 
+  // Ответы из другой вкладки подхватываем, чтобы не затереть их старой копией.
+  window.addEventListener('storage', (e) => {
+    if (e.key === STORAGE_KEY) { state = loadState(); route(); }
+  });
+
   // ---------- Утилиты ----------
 
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -39,7 +47,9 @@
   // Шаблоны вида {был|была} выбирают форму по полу автора.
   const gendered = (str, gender) => String(str).replace(/\{([^|}]*)\|([^}]*)\}/g, (_, m, f) => (gender === 'f' ? f : m));
 
-  const allQuestions = () => CHAPTERS.flatMap((c, ci) => c.questions.map((q, qi) => ({ q, ci, qi })));
+  const ALL = CHAPTERS.flatMap((c, ci) => c.questions.map((q, qi) => ({ q, ci, qi })));
+  const TOTAL = ALL.length;
+  const stepIndex = (ci, qi) => ALL.findIndex((x) => x.ci === ci && x.qi === qi);
 
   function isAnswered(q, s = state) {
     if (q.type === 'profile') return Boolean(s.profile.name.trim());
@@ -47,13 +57,14 @@
     return Boolean(a && ((a.text || '').trim() || (a.options || []).length));
   }
 
-  function progress(s = state) {
-    const all = allQuestions();
-    return Math.round((all.filter(({ q }) => isAnswered(q, s)).length / all.length) * 100);
-  }
+  const answeredCount = (s = state) => ALL.filter(({ q }) => isAnswered(q, s)).length;
+  const chapterCount = (c) => c.questions.filter((q) => isAnswered(q)).length;
 
-  function chapterDone(c) {
-    return c.questions.every((q) => isAnswered(q));
+  function plural(n, one, few, many) {
+    const m10 = n % 10, m100 = n % 100;
+    if (m10 === 1 && m100 !== 11) return one;
+    if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few;
+    return many;
   }
 
   function toast(text) {
@@ -74,129 +85,151 @@
   }
 
   const icon = {
-    arrow: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
-    back: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>',
-    play: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="10"/><path d="M10 8.5v7l5.5-3.5z" fill="currentColor"/></svg>',
-    mic: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>',
-    book: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M3 5.5c3-1 6-1 9 1 3-2 6-2 9-1V19c-3-1-6-1-9 1-3-2-6-2-9-1z"/><path d="M12 6.5V20"/></svg>',
-    photo: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-8 8"/></svg>',
-    download: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
-    check: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"/></svg>',
-    gift: '<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><rect x="3" y="9" width="18" height="12" rx="1"/><path d="M2 9h20M12 9v12M12 9c-2-4-6-5-6-2s6 2 6 2zM12 9c2-4 6-5 6-2s-6 2-6 2z"/></svg>',
+    arrow: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
+    back: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>',
+    mic: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>',
+    book: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M3 5.5c3-1 6-1 9 1 3-2 6-2 9-1V19c-3-1-6-1-9 1-3-2-6-2-9-1z"/><path d="M12 6.5V20"/></svg>',
+    photo: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-8 8"/></svg>',
+    download: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>',
+    check: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"/></svg>',
+    spark: '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l1.9 6.1L20 10l-6.1 1.9L12 18l-1.9-6.1L4 10l6.1-1.9z"/></svg>',
+    chat: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></svg>',
+    save: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"/></svg>',
   };
 
-  const logo = (dark) => `<a class="logo ${dark ? 'logo--light' : ''}" href="#/">${icon.book}<span>Моя история</span></a>`;
+  const logo = () => `<a class="logo" href="#/"><span class="logo__mark">${icon.book}</span><span>Моя история</span></a>`;
 
-  // Пейзаж из слоёв гор — заменяет фотографии в MVP.
-  function scene(name, extra = '') {
-    return `<div class="scene scene--${name} ${extra}" aria-hidden="true">
-      <div class="scene__sun"></div>
-      <svg class="scene__hills" viewBox="0 0 800 400" preserveAspectRatio="none">
-        <path class="h1" d="M0 230 L90 180 L170 215 L260 150 L360 205 L450 160 L560 210 L660 165 L800 200 V400 H0Z"/>
-        <path class="h2" d="M0 280 L120 235 L230 270 L340 225 L470 275 L590 240 L700 270 L800 250 V400 H0Z"/>
-        <path class="h3" d="M0 330 C140 300 260 320 380 305 S640 290 800 315 V400 H0Z"/>
-      </svg>
-      <div class="scene__grain"></div>
-    </div>`;
+  // Мягкое цветное пятно — визуальный «характер» главы вместо фотографий.
+  const aura = (hue, extra = '') => `<div class="aura ${extra}" style="--h:${hue}" aria-hidden="true"></div>`;
+
+  function resumeInfo() {
+    const done = answeredCount();
+    if (!done) return null;
+    const [ci, qi] = resumeStep();
+    return { done, ci, qi, chapter: CHAPTERS[ci], n: stepIndex(ci, qi) + 1 };
   }
 
   // ---------- Лендинг ----------
 
   function renderLanding() {
+    const r = resumeInfo();
+    const pct = Math.round((answeredCount() / TOTAL) * 100);
+
     app.innerHTML = `
     <header class="nav">
-      ${logo(true)}
+      ${logo()}
       <nav class="nav__links">
         <a href="#how">Как это работает</a>
-        <a href="#/example">Пример</a>
-        <a href="#pricing">Цены</a>
+        <a href="#chapters">Вопросы</a>
+        <a href="#/example">Пример книги</a>
       </nav>
-      <a class="btn btn--light btn--sm" href="#/interview">${progress() ? 'Продолжить историю' : 'Создать свою историю'}</a>
+      <a class="btn btn--dark btn--sm" href="#/interview">${r ? 'Продолжить' : 'Начать интервью'}</a>
     </header>
 
     <section class="hero">
-      ${scene('sunset', 'scene--hero')}
-      <div class="hero__inner">
-        <h1>Твоя жизнь заслуживает быть услышанной</h1>
-        <p>Ответь на несколько вопросов — голосом или текстом — и мы соберём полноценную автобиографию с историями, которые ты, возможно, уже не помнишь.</p>
+      ${aura(24, 'aura--hero-a')}${aura(265, 'aura--hero-b')}${aura(165, 'aura--hero-c')}
+      <div class="hero__copy">
+        <p class="pill">${icon.spark} Голосом или текстом</p>
+        <h1>Интервью <em>с самим собой</em></h1>
+        <p class="hero__sub">Твоя автобиография за один час</p>
+        <p class="hero__text">Ответь на несколько вопросов — голосом или текстом — и мы соберём полноценную автобиографию всей твоей жизни.</p>
+        ${r ? `
+        <a class="resume" href="#/interview">
+          <div class="resume__top"><span>Ты остановил${state.profile.gender === 'f' ? 'ась' : 'ся'} на вопросе ${r.n} из ${TOTAL}</span><strong>${pct}%</strong></div>
+          <div class="bar"><span style="width:${pct}%"></span></div>
+          <div class="resume__bottom"><span>Глава «${esc(r.chapter.title)}»</span><span class="resume__go">Продолжить ${icon.arrow}</span></div>
+        </a>` : `
         <div class="hero__actions">
-          <a class="btn btn--light" href="#/interview">Начать ${icon.arrow}</a>
-          <a class="link-light" href="#/example">${icon.play} Посмотреть пример</a>
+          <a class="btn btn--dark btn--lg" href="#/interview">Начать интервью ${icon.arrow}</a>
+          <a class="btn btn--ghost btn--lg" href="#/example">Пример книги</a>
+        </div>`}
+        <p class="hero__fine">Бесплатно · без регистрации · прогресс сохраняется автоматически</p>
+      </div>
+
+      <div class="hero__demo" aria-hidden="true">
+        <div class="demo-card demo-card--q">
+          <p class="demo-card__meta">Вопрос 8 из ${TOTAL} · Детство</p>
+          <p class="demo-card__title">Какое место из детства ты помнишь лучше всего?</p>
+          <div class="demo-card__answer">Дом бабушки в деревне. Скрипучее крыльцо, запах яблок в сенях…<span class="caret"></span></div>
+          <div class="demo-card__row"><span class="demo-mic">${icon.mic}</span><span class="wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span></div>
+        </div>
+        <div class="demo-card demo-card--follow">
+          <span class="demo-card__avatar">${icon.spark}</span>
+          <p>А кто был рядом с тобой в тот момент?</p>
+        </div>
+        <div class="demo-book"><span>Автобиография</span><strong>Сергей Волков</strong><em>1968 — ${new Date().getFullYear()}</em></div>
+      </div>
+    </section>
+
+    <section class="stats">
+      <div><strong>${TOTAL}</strong><span>вопросов</span></div>
+      <div><strong>${CHAPTERS.length}</strong><span>глав жизни</span></div>
+      <div><strong>~1 час</strong><span>на интервью</span></div>
+      <div><strong>PDF</strong><span>готовая книга</span></div>
+    </section>
+
+    <section class="section" id="how">
+      <p class="eyebrow">Как это работает</p>
+      <h2>Ты рассказываешь. Мы собираем книгу.</h2>
+      <div class="features">
+        <article class="feature">${aura(24, 'aura--icon')}<span class="feature__icon">${icon.mic}</span><h3>Отвечай как удобно</h3><p>Пиши или говори вслух — мы расшифруем голос в текст.</p></article>
+        <article class="feature">${aura(265, 'aura--icon')}<span class="feature__icon">${icon.chat}</span><h3>Вспоминай детали</h3><p>Уточняющие вопросы помогают достать истории, о которых ты забыл.</p></article>
+        <article class="feature">${aura(165, 'aura--icon')}<span class="feature__icon">${icon.save}</span><h3>Возвращайся когда угодно</h3><p>Каждый ответ сохраняется сразу. Закрой вкладку — продолжишь с того же вопроса.</p></article>
+        <article class="feature">${aura(205, 'aura--icon')}<span class="feature__icon">${icon.book}</span><h3>Получи книгу</h3><p>Обложка, содержание, главы и фото — в аккуратном PDF.</p></article>
+      </div>
+    </section>
+
+    <section class="section" id="chapters">
+      <p class="eyebrow">О чём мы спросим</p>
+      <h2>${CHAPTERS.length} глав — вся жизнь</h2>
+      <div class="chapter-grid">
+        ${CHAPTERS.map((c, i) => `
+          <a class="chapter-card" href="#/interview/${i}/0">
+            ${aura(c.hue, 'aura--card')}
+            <span class="chapter-card__num">${String(i + 1).padStart(2, '0')}</span>
+            <strong>${esc(c.title)}</strong>
+            <span class="chapter-card__q">${esc(gendered(c.questions[c.questions[0].type === 'profile' ? 1 : 0].title, state.profile.gender))}</span>
+          </a>`).join('')}
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="product">
+        ${aura(24, 'aura--product-a')}${aura(265, 'aura--product-b')}
+        <div class="product__copy">
+          <p class="eyebrow">Один продукт</p>
+          <h2>Сгенерировать автобиографию</h2>
+          <p>Пройди интервью и скачай готовую книгу своей жизни. Отличный подарок родителям — их история тоже важна.</p>
+        </div>
+        <div class="product__card">
+          <ul class="checks">
+            <li>${icon.check} ${TOTAL} вопросов в ${CHAPTERS.length} главах</li>
+            <li>${icon.check} Ответы голосом или текстом</li>
+            <li>${icon.check} Фотографии с подписями</li>
+            <li>${icon.check} Книга в PDF формата A5</li>
+            <li>${icon.check} Автосохранение прогресса</li>
+          </ul>
+          <div class="product__price"><strong>Бесплатно</strong><span>в раннем доступе</span></div>
+          <a class="btn btn--dark btn--lg btn--block" href="#/interview">${r ? 'Продолжить интервью' : 'Сгенерировать автобиографию'} ${icon.arrow}</a>
         </div>
       </div>
-      <p class="hero__note">Иногда самые важные моменты<br>не в памяти, а в сердце.</p>
     </section>
 
-    <section class="how" id="how">
-      <div class="how__text">
-        <p class="eyebrow">Как это работает</p>
-        <h2>Просто. Глубоко. По-настоящему.</h2>
-        <p class="muted">Ты отвечаешь на вопросы, а мы превращаем их в живую историю твоей жизни — с воспоминаниями, эмоциями и деталями, которые делают тебя тобой.</p>
-        <ol class="steps">
-          <li><span>1</span><div><h3>Ты отвечаешь на вопросы</h3><p>О детстве, людях, выборах, мечтах и самых ярких моментах. Можно говорить вслух.</p></div></li>
-          <li><span>2</span><div><h3>Мы помогаем вспомнить</h3><p>Уточняющие вопросы подсказывают детали, о которых ты мог забыть.</p></div></li>
-          <li><span>3</span><div><h3>История собирается в книгу</h3><p>Главы, фотографии и подписи складываются в красивую вёрстку.</p></div></li>
-          <li><span>4</span><div><h3>Ты скачиваешь PDF</h3><p>Готовую книгу можно сохранить, распечатать или подарить близким.</p></div></li>
-        </ol>
-      </div>
-      <div class="how__visual">${bookMock('Моя история', '')}</div>
-    </section>
-
-    <section class="showcase">
-      <div class="showcase__text">
-        <h2>Твоя история в красивой книге</h2>
-        <span class="rule"></span>
-        <p>После интервью все воспоминания соберутся в единую автобиографию. Ты сможешь вернуться, дополнить ответы и скачать новую версию в PDF.</p>
-        <a class="btn btn--cream" href="#/example">Посмотреть пример ${icon.arrow}</a>
-      </div>
-      <div class="showcase__visual">${bookMock('Моя история', 'Автобиография')}</div>
-    </section>
-
-    <section class="pricing" id="pricing">
-      <div class="pricing__intro">
-        <p class="eyebrow eyebrow--light">Цены</p>
-        <h2>Сохрани свою историю на всю жизнь</h2>
-        <p>Сейчас идёт ранний доступ — создание книги и скачивание PDF бесплатны.</p>
-        <div class="gift">${icon.gift}<span>Отличный подарок для родителей и близких. Их история — это тоже важно.</span></div>
-      </div>
-      <div class="plans">
-        <article class="plan">
-          <h3>Ранний доступ</h3><p>Все главы, фотографии и PDF-книга</p>
-          <strong>0 ₽</strong>
-          <a class="btn btn--dark btn--block" href="#/interview">Начать</a>
-        </article>
-        <article class="plan">
-          <h3>С редактором</h3><p>Литературная обработка текста с помощью ИИ</p>
-          <strong>1 990 ₽</strong>
-          <span class="btn btn--ghost btn--block" aria-disabled="true">Скоро</span>
-        </article>
-        <article class="plan">
-          <h3>Печатная книга</h3><p>Твёрдый переплёт, фотографии, доставка</p>
-          <strong class="plan__small">Цена после расчёта</strong>
-          <span class="btn btn--ghost btn--block" aria-disabled="true">Скоро</span>
-        </article>
-      </div>
-    </section>
-
-    <footer class="footer">${logo(false)}<span class="muted">Ответы хранятся только в твоём браузере.</span></footer>`;
-  }
-
-  function bookMock(title, subtitle) {
-    return `<div class="mock">
-      <div class="mock__photo mock__photo--a">${scene('lake')}</div>
-      <div class="mock__photo mock__photo--b">${scene('field')}</div>
-      <div class="mock__book">
-        <div class="mock__title">${esc(title)}</div>
-        ${subtitle ? `<div class="mock__sub">${esc(subtitle)}</div>` : ''}
-      </div>
-    </div>`;
+    <footer class="footer">${logo()}<span>Ответы хранятся только в твоём браузере и никуда не отправляются.</span></footer>`;
   }
 
   // ---------- Интервью ----------
 
   function firstOpenStep() {
-    const hit = allQuestions().find(({ q }) => !isAnswered(q));
+    const hit = ALL.find(({ q }) => !isAnswered(q));
     return hit ? [hit.ci, hit.qi] : [0, 0];
+  }
+
+  // Возвращаемся туда, где человек был в прошлый раз; иначе — к первому пустому вопросу.
+  function resumeStep() {
+    const l = state.last;
+    if (Array.isArray(l) && CHAPTERS[l[0]] && CHAPTERS[l[0]].questions[l[1]]) return l;
+    return firstOpenStep();
   }
 
   let recognition = null;
@@ -215,74 +248,88 @@
     const q = chapter && chapter.questions[qi];
     if (!q) return go('#/interview');
 
+    state.last = [ci, qi];
+    save();
+
     const g = state.profile.gender;
-    const pct = progress();
+    const done = answeredCount();
+    const pct = Math.round((done / TOTAL) * 100);
+    const n = stepIndex(ci, qi) + 1;
     const answer = state.answers[q.id] || { text: '', options: [] };
     const photo = state.photos[chapter.id];
-    const isLast = ci === CHAPTERS.length - 1 && qi === chapter.questions.length - 1;
+    const isLast = n === TOTAL;
     const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
 
     app.innerHTML = `
     <div class="studio">
-      <aside class="studio__side">
-        ${logo(true)}
-        <nav class="chapters">
-          ${CHAPTERS.map((c, i) => `
-            <a href="#/interview/${i}/0" class="chapters__item ${i === ci ? 'is-active' : ''} ${chapterDone(c) ? 'is-done' : ''}">
-              <span class="chapters__dot">${chapterDone(c) ? icon.check : ''}</span>${esc(c.title)}
-            </a>`).join('')}
+      <header class="studio__bar">
+        ${logo()}
+        <div class="studio__progress">
+          <span>${done} из ${TOTAL} ${plural(done, 'ответ', 'ответа', 'ответов')}</span>
+          <div class="bar"><span style="width:${pct}%"></span></div>
+        </div>
+        <span class="saved" data-saved>${icon.check} Сохранено</span>
+        <a class="btn btn--ghost btn--sm" href="#/book">${icon.book} Книга</a>
+      </header>
+
+      <div class="studio__body">
+        <nav class="chapters" aria-label="Главы">
+          ${CHAPTERS.map((c, i) => {
+            const k = chapterCount(c), all = c.questions.length;
+            return `<a href="#/interview/${i}/0" class="chapters__item ${i === ci ? 'is-active' : ''} ${k === all ? 'is-done' : ''}">
+              <span class="chapters__dot" style="--h:${c.hue}">${k === all ? icon.check : i + 1}</span>
+              <span class="chapters__name">${esc(c.title)}</span>
+              <span class="chapters__count">${k}/${all}</span>
+            </a>`;
+          }).join('')}
         </nav>
-        <div class="ring-card">
-          <p>Ты на пути<br>к своей книге</p>
-          <div class="ring" style="--p:${pct}"><span>${pct}%</span></div>
-        </div>
-        <a class="btn btn--outline-light btn--block" href="#/book">Открыть книгу</a>
-      </aside>
 
-      <main class="studio__main">
-        <div class="studio__content">
-          <div class="studio__top">
-            <p class="eyebrow eyebrow--light">Глава ${ci + 1} · ${esc(chapter.title)}</p>
-            <div class="dots">${chapter.questions.map((_, i) => `<span class="${i === qi ? 'is-on' : ''}"></span>`).join('')}</div>
-          </div>
-
-          <h1 class="q-title">${esc(gendered(q.title, g))}</h1>
-          <p class="q-lead">${esc(gendered(q.lead || '', g))}</p>
-
-          ${q.type === 'profile' ? profileForm() : `
-            ${q.options ? `<div class="options">${q.options.map((o, i) => {
-              const on = (answer.options || []).includes(i);
-              return `<button type="button" class="option ${on ? 'is-on' : ''}" data-opt="${i}" aria-pressed="${on}"><span class="option__mark"></span>${esc(gendered(o, g))}</button>`;
-            }).join('')}</div>` : ''}
-            <div class="answer">
-              <textarea id="answer" rows="${q.options ? 4 : 7}" placeholder="${q.options ? 'Расскажи подробнее — что вспоминается?' : 'Напиши свой ответ…'}">${esc(answer.text)}</textarea>
-              ${SpeechRec ? `<button type="button" class="mic" id="mic" aria-label="Надиктовать ответ" title="Надиктовать голосом">${icon.mic}</button>` : ''}
+        <main class="stage">
+          ${aura(chapter.hue, 'aura--stage')}
+          <div class="card">
+            <div class="card__top">
+              <p class="eyebrow">Глава ${ci + 1} · ${esc(chapter.title)}</p>
+              <p class="card__n">Вопрос ${n} из ${TOTAL}</p>
             </div>
-            <p class="hint">${SpeechRec ? 'Можно писать или записывать голос.' : 'Голосовой ввод доступен в Chrome и Safari.'} <span class="saved" data-saved>Сохранено</span></p>
-            <div class="follow" id="follow" hidden>
-              <span class="follow__avatar">${icon.book}</span>
-              <div><p class="follow__label">Уточняющий вопрос</p><p class="follow__text" id="follow-text"></p></div>
-            </div>
-          `}
+            <div class="dots">${chapter.questions.map((qq, i) => `<a href="#/interview/${ci}/${i}" class="${i === qi ? 'is-on' : ''} ${isAnswered(qq) ? 'is-done' : ''}" aria-label="Вопрос ${i + 1}"></a>`).join('')}</div>
 
-          <div class="photo-slot">
+            <h1 class="q-title">${esc(gendered(q.title, g))}</h1>
+            <p class="q-lead">${esc(gendered(q.lead || '', g))}</p>
+
+            ${q.type === 'profile' ? profileForm() : `
+              ${q.options ? `<div class="options">${q.options.map((o, i) => {
+                const on = (answer.options || []).includes(i);
+                return `<button type="button" class="option ${on ? 'is-on' : ''}" data-opt="${i}" aria-pressed="${on}"><span class="option__mark">${icon.check}</span>${esc(gendered(o, g))}</button>`;
+              }).join('')}</div>` : ''}
+              <div class="answer">
+                <textarea id="answer" rows="${q.options ? 3 : 6}" placeholder="${q.options ? 'Расскажи подробнее — что вспоминается?' : 'Начни писать или нажми на микрофон…'}">${esc(answer.text)}</textarea>
+                <div class="answer__tools">
+                  ${SpeechRec ? `<button type="button" class="mic" id="mic">${icon.mic}<span>Ответить голосом</span></button>` : '<span class="hint">Голосовой ввод работает в Chrome и Safari</span>'}
+                  <label class="photo-add" title="Фото к главе">${icon.photo}<span>${photo ? 'Заменить фото' : 'Фото к главе'}</span><input type="file" id="photo" accept="image/*" hidden></label>
+                </div>
+              </div>
+              <div class="follow" id="follow" hidden>
+                <span class="follow__avatar">${icon.spark}</span>
+                <div><p class="follow__label">Уточняющий вопрос</p><p class="follow__text" id="follow-text"></p></div>
+              </div>
+            `}
+
             ${photo ? `
-              <figure class="photo-slot__preview"><img src="${photo.src}" alt="">
-                <figcaption><input id="caption" value="${esc(photo.caption)}" placeholder="Подпись к фото"><button type="button" class="link-light" id="photo-remove">Убрать</button></figcaption>
-              </figure>` : `
-              <label class="photo-slot__add">${icon.photo}<span>Добавить фото к главе «${esc(chapter.title)}»</span><input type="file" id="photo" accept="image/*" hidden></label>`}
-          </div>
+              <figure class="photo-preview"><img src="${photo.src}" alt="">
+                <figcaption><input id="caption" value="${esc(photo.caption)}" placeholder="Подпись к фото"><button type="button" class="link" id="photo-remove">Убрать</button></figcaption>
+              </figure>` : ''}
 
-          <div class="studio__nav">
-            <div>
-              ${ci || qi ? `<a class="link-light" href="#/interview/${prevStep(ci, qi).join('/')}">${icon.back} Назад</a>` : ''}
-              <a class="link-light muted-light" href="${nextHref(ci, qi)}">Пропустить</a>
+            <div class="card__nav">
+              ${n > 1 ? `<a class="btn btn--ghost" href="#/interview/${prevStep(ci, qi).join('/')}">${icon.back}<span class="hide-sm">Назад</span></a>` : '<span></span>'}
+              <div class="card__nav-right">
+                <a class="link" href="${nextHref(ci, qi)}">Пропустить</a>
+                <a class="btn btn--dark" id="next" href="${nextHref(ci, qi)}">${isLast ? 'Собрать книгу' : 'Далее'} ${icon.arrow}</a>
+              </div>
             </div>
-            <a class="btn btn--light" href="${nextHref(ci, qi)}">${isLast ? 'Собрать книгу' : 'Далее'} ${icon.arrow}</a>
           </div>
-        </div>
-        <div class="studio__scene">${scene(chapter.scene)}</div>
-      </main>
+          <p class="stage__hint">Прогресс сохраняется автоматически — можно закрыть вкладку и вернуться позже. <kbd>⌘</kbd>+<kbd>Enter</kbd> — следующий вопрос.</p>
+        </main>
+      </div>
     </div>`;
 
     bindInterview(chapter, q, SpeechRec);
@@ -296,11 +343,10 @@
         <label>Год рождения<input id="p-born" value="${esc(p.born)}" inputmode="numeric" maxlength="4" placeholder="1968"></label>
         <label>Место рождения<input id="p-city" value="${esc(p.city)}" placeholder="Город или село"></label>
       </div>
-      <fieldset class="seg"><legend>Как к тебе обращаться в книге?</legend>
+      <fieldset class="seg"><legend>Как обращаться к тебе в книге?</legend>
         <button type="button" data-gender="m" class="${p.gender !== 'f' ? 'is-on' : ''}">Он</button>
         <button type="button" data-gender="f" class="${p.gender === 'f' ? 'is-on' : ''}">Она</button>
       </fieldset>
-      <p class="hint"><span class="saved" data-saved>Сохранено</span></p>
     </div>`;
   }
 
@@ -328,6 +374,8 @@
       const el = document.getElementById(`p-${k}`);
       if (el) el.addEventListener('input', () => { state.profile[k] = el.value; save(); });
     });
+    const nameInput = document.getElementById('p-name');
+    if (nameInput && !nameInput.value) nameInput.focus({ preventScroll: true });
     app.querySelectorAll('[data-gender]').forEach((b) => b.addEventListener('click', () => {
       state.profile.gender = b.dataset.gender;
       save();
@@ -362,14 +410,27 @@
     if (ta) {
       ta.addEventListener('input', () => { answer().text = ta.value; save(); updateFollow(); });
       updateFollow();
-      if (q.type !== 'profile' && !q.options) ta.focus({ preventScroll: true });
+      if (!q.options) {
+        ta.focus({ preventScroll: true });
+        ta.setSelectionRange(ta.value.length, ta.value.length);
+      }
     }
+
+    // ⌘/Ctrl + Enter — следующий вопрос
+    app.querySelector('.card').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        document.getElementById('next').click();
+      }
+    });
 
     // Голос
     const mic = document.getElementById('mic');
     if (mic && SpeechRec) {
+      const label = mic.querySelector('span');
+      const setRec = (on) => { mic.classList.toggle('is-rec', on); label.textContent = on ? 'Остановить запись' : 'Ответить голосом'; };
       mic.addEventListener('click', () => {
-        if (recognition) { stopRecognition(); mic.classList.remove('is-rec'); return; }
+        if (recognition) { stopRecognition(); setRec(false); return; }
         recognition = new SpeechRec();
         recognition.lang = 'ru-RU';
         recognition.continuous = true;
@@ -391,9 +452,9 @@
         recognition.onerror = (e) => {
           if (e.error === 'not-allowed') toast('Разреши доступ к микрофону в настройках браузера.');
         };
-        recognition.onend = () => { recognition = null; mic.classList.remove('is-rec'); };
+        recognition.onend = () => { recognition = null; setRec(false); };
         recognition.start();
-        mic.classList.add('is-rec');
+        setRec(true);
       });
     }
 
@@ -403,9 +464,10 @@
       const f = file.files[0];
       if (!f) return;
       try {
+        const prev = state.photos[chapter.id];
         const src = await compressImage(f, 1100, 0.72);
-        state.photos[chapter.id] = { src, caption: '' };
-        if (!save()) delete state.photos[chapter.id];
+        state.photos[chapter.id] = { src, caption: prev ? prev.caption : '' };
+        if (!save()) { if (prev) state.photos[chapter.id] = prev; else delete state.photos[chapter.id]; }
         route();
       } catch (e) {
         toast('Не получилось прочитать изображение.');
@@ -476,6 +538,7 @@
         <div class="bk-cover__frame">
           <p class="bk-cover__kicker">Автобиография</p>
           <h1>${esc(name)}</h1>
+          <span class="bk-cover__rule"></span>
           <p class="bk-cover__years">${years}</p>
           <p class="bk-cover__brand">Моя история</p>
         </div>
@@ -500,20 +563,22 @@
     stopRecognition();
     const s = isExample ? window.EXAMPLE_STATE : state;
     const { chapters, html } = bookMarkup(s);
+    const done = answeredCount(s);
 
     app.innerHTML = `
     <div class="reader">
       <header class="reader__bar">
-        <a class="link-dark" href="${isExample ? '#/' : '#/interview'}">${icon.back} ${isExample ? 'На главную' : 'Вернуться к интервью'}</a>
+        <a class="btn btn--ghost btn--sm" href="${isExample ? '#/' : '#/interview'}">${icon.back}<span class="hide-sm">${isExample ? 'На главную' : 'К интервью'}</span></a>
+        ${isExample ? '<span class="reader__label">Пример книги</span>' : `<span class="reader__label">${done} из ${TOTAL} ${plural(done, 'ответ', 'ответа', 'ответов')}</span>`}
         <div class="reader__actions">
           ${isExample ? `<a class="btn btn--dark btn--sm" href="#/interview">Создать свою ${icon.arrow}</a>` : `
-            <button class="btn btn--ghost-dark btn--sm" id="reset">Начать заново</button>
+            <button class="btn btn--ghost btn--sm hide-sm" id="reset">Начать заново</button>
             <button class="btn btn--dark btn--sm" id="pdf" ${chapters.length ? '' : 'disabled'}>${icon.download} Скачать PDF</button>`}
         </div>
       </header>
       <div class="reader__body">
         <aside class="reader__toc">
-          ${chapters.map((x) => `<a href="#ch-${x.c.id}" data-jump="ch-${x.c.id}"><span class="reader__thumb">${x.photo ? `<img src="${x.photo.src}" alt="">` : scene(x.c.scene)}</span>${esc(x.c.title)}</a>`).join('')}
+          ${chapters.map((x) => `<a href="#ch-${x.c.id}" data-jump="ch-${x.c.id}"><span class="reader__thumb" style="--h:${x.c.hue}">${x.photo ? `<img src="${x.photo.src}" alt="">` : ''}</span>${esc(x.c.title)}</a>`).join('')}
         </aside>
         <article class="paper" id="book">${html}</article>
       </div>
@@ -555,7 +620,7 @@
         margin: [16, 15, 18, 15],
         filename: fileName,
         image: { type: 'jpeg', quality: 0.92 },
-        html2canvas: { scale: 2, useCORS: true, backgroundColor: '#fbf8f2' },
+        html2canvas: { scale: 2, useCORS: true, backgroundColor: '#fffdf9' },
         jsPDF: { unit: 'mm', format: 'a5', orientation: 'portrait' },
         pagebreak: { mode: ['css', 'legacy'], before: ['.bk-toc', '.bk-chapter'], avoid: ['.bk-photo', '.bk-sub', 'p'] },
       }).from(holder.firstElementChild).save();
@@ -578,17 +643,15 @@
   function route() {
     const hash = location.hash || '#/';
     const m = hash.match(/^#\/interview(?:\/(\d+)\/(\d+))?$/);
-    document.body.className = '';
     if (m) {
-      document.body.classList.add('is-dark');
-      if (m[1] === undefined) return go(`#/interview/${firstOpenStep().join('/')}`);
+      if (m[1] === undefined) return go(`#/interview/${resumeStep().join('/')}`);
       renderInterview(Number(m[1]), Number(m[2]));
       window.scrollTo(0, 0);
     } else if (hash === '#/book' || hash === '#/example') {
       renderBook(hash === '#/example');
       window.scrollTo(0, 0);
     } else if (hash === '#/' || !hash.startsWith('#/')) {
-      // Якоря лендинга (#how, #pricing) прокручиваем, не перерисовывая страницу.
+      // Якоря лендинга (#how, #chapters) прокручиваем, не перерисовывая страницу.
       if (!app.querySelector('.hero')) renderLanding();
       const target = hash.startsWith('#/') ? null : document.querySelector(hash);
       if (target) target.scrollIntoView({ behavior: 'smooth' }); else window.scrollTo(0, 0);
