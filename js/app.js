@@ -211,7 +211,7 @@
             <li>${icon.check} Автосохранение прогресса</li>
           </ul>
           <div class="product__price"><strong>Бесплатно</strong><span>в раннем доступе</span></div>
-          <a class="btn btn--dark btn--lg btn--block" href="#/interview">${r ? 'Продолжить интервью' : 'Сгенерировать автобиографию'} ${icon.arrow}</a>
+          <a class="btn btn--dark btn--lg btn--block" href="#/interview">${r ? 'Продолжить интервью' : '<span class="hide-sm">Сгенерировать автобиографию</span><span class="show-sm">Создать мою книгу</span>'} ${icon.arrow}</a>
         </div>
       </div>
     </section>

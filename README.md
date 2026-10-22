@@ -17,7 +17,7 @@ python3 -m http.server 5173
 
 ## Деплой
 
-GitHub Pages: Settings → Pages → Deploy from a branch → `main` / `(root)`. Каждый пуш в `main` обновляет сайт.
+GitHub Pages: Settings → Pages → Deploy from a branch → `main` / `(root)`. Каждый пуш в `main` обновляет сайт. Перед коммитом запусти `./bump-version.sh` — он меняет версию у CSS/JS, чтобы браузеры не показывали старые файлы из кэша.
 
 ## Дальше
 
