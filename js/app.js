@@ -116,14 +116,15 @@
     const pct = Math.round((answeredCount() / TOTAL) * 100);
 
     app.innerHTML = `
-    <header class="nav">
+    <header class="nav" id="nav">
       ${logo()}
-      <nav class="nav__links">
+      <nav class="nav__links" id="nav-links">
         <a href="#how">Как это работает</a>
         <a href="#chapters">Вопросы</a>
         <a href="#/example">Пример книги</a>
       </nav>
-      <a class="btn btn--dark btn--sm" href="#/interview">${r ? 'Продолжить' : 'Начать интервью'}</a>
+      <a class="btn btn--dark btn--sm" href="#/interview">${r ? 'Продолжить' : '<span class="hide-sm">Начать интервью</span><span class="show-sm">Начать</span>'}</a>
+      <button type="button" class="nav__burger" id="burger" aria-label="Меню" aria-expanded="false" aria-controls="nav-links"><span></span></button>
     </header>
 
     <section class="hero">
@@ -216,6 +217,12 @@
     </section>
 
     <footer class="footer">${logo()}<span>Ответы хранятся только в твоём браузере и никуда не отправляются.</span></footer>`;
+
+    const nav = document.getElementById('nav');
+    const burger = document.getElementById('burger');
+    const setMenu = (open) => { nav.classList.toggle('nav--open', open); burger.setAttribute('aria-expanded', String(open)); };
+    burger.addEventListener('click', () => setMenu(!nav.classList.contains('nav--open')));
+    nav.querySelectorAll('.nav__links a').forEach((a) => a.addEventListener('click', () => setMenu(false)));
   }
 
   // ---------- Интервью ----------
