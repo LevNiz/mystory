@@ -53,9 +53,11 @@
     if (e.key === STORAGE_KEY) { state = loadState(); route(); }
   });
 
+  // Событие пишем локально и отправляем целью в Метрику (если счётчик подключён).
   function track(name) {
     state.events.push({ name, at: Date.now() });
     if (state.events.length > 200) state.events.shift();
+    if (window.analytics) window.analytics.goal(name);
   }
 
   // ---------- Утилиты ----------
