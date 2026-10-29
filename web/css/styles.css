@@ -730,3 +730,10 @@ kbd { font: 12px var(--sans); padding: 1px 6px; border-radius: 6px; border: 1px 
 @media (max-width: 760px) {
   .checkout__grid { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* ---------- Промокод ---------- */
+.plan__price s { font-size: 20px; color: var(--muted); font-weight: 500; }
+.promo-note { display: inline-flex; align-items: center; gap: 6px; margin: -10px 0 18px; padding: 6px 12px; border-radius: 999px; background: var(--accent-soft); color: #b4441f; font-size: 13px; font-weight: 500; }
+.promo-note svg { flex: none; }
+.plan__price { flex-wrap: wrap; row-gap: 2px; }
+.plan__price strong, .plan__price s, .plan__price span { white-space: nowrap; }

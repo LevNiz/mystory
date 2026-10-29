@@ -41,6 +41,19 @@ CREATE TABLE IF NOT EXISTS payments (
     updated_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS payments_book ON payments (book_id, status);
+CREATE TABLE IF NOT EXISTS settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS promos (
+    code        TEXT PRIMARY KEY,
+    percent     INTEGER NOT NULL,
+    active      INTEGER NOT NULL DEFAULT 1,
+    note        TEXT NOT NULL DEFAULT '',
+    visits      INTEGER NOT NULL DEFAULT 0,
+    uniques     INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS counters (
     key         TEXT PRIMARY KEY,
     value       INTEGER NOT NULL,
@@ -60,7 +73,7 @@ class Database:
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(SCHEMA)
             # Колонки, добавленные после первого запуска.
-            for column in ("email TEXT", "pay_url TEXT", "qr_link TEXT"):
+            for column in ("email TEXT", "pay_url TEXT", "qr_link TEXT", "promo TEXT", "base_amount TEXT"):
                 try:
                     self._conn.execute(f"ALTER TABLE payments ADD COLUMN {column}")
                 except sqlite3.OperationalError:
@@ -132,14 +145,81 @@ class Database:
     # --- Платежи ---
 
     def add_payment(
-        self, uuid: str, book_id: str, provider_id: int, amount: str, email: str, pay_url: str, qr_link: str | None
+        self,
+        uuid: str,
+        book_id: str,
+        provider_id: int,
+        amount: str,
+        email: str,
+        pay_url: str,
+        qr_link: str | None,
+        promo: str | None,
+        base_amount: str,
     ) -> None:
         now = int(time.time())
         self._q(
-            "INSERT INTO payments (uuid, book_id, provider_id, amount, email, pay_url, qr_link, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (uuid, book_id, provider_id, amount, email, pay_url, qr_link, now, now),
+            "INSERT INTO payments (uuid, book_id, provider_id, amount, email, pay_url, qr_link, promo, base_amount, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (uuid, book_id, provider_id, amount, email, pay_url, qr_link, promo, base_amount, now, now),
         )
+
+    def recent_payments(self, limit: int = 30) -> list[dict[str, Any]]:
+        rows = self._q("SELECT * FROM payments ORDER BY created_at DESC LIMIT ?", (limit,))
+        return [dict(r) for r in rows]
+
+    def totals(self) -> dict[str, Any]:
+        paid = self._q("SELECT COUNT(*) AS n, COALESCE(SUM(CAST(amount AS REAL)), 0) AS s FROM payments WHERE status = 'paid'")[0]
+        books = self._q("SELECT COUNT(*) AS n, COALESCE(SUM(paid), 0) AS p FROM books")[0]
+        return {"paid": paid["n"], "revenue": paid["s"], "books": books["n"], "paid_books": books["p"]}
+
+    # --- Настройки и промокоды ---
+
+    def setting(self, key: str) -> str | None:
+        rows = self._q("SELECT value FROM settings WHERE key = ?", (key,))
+        return rows[0]["value"] if rows else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        self._q(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+    def promo(self, code: str) -> dict[str, Any] | None:
+        rows = self._q("SELECT * FROM promos WHERE code = ?", (code,))
+        return dict(rows[0]) if rows else None
+
+    def add_promo(self, code: str, percent: int, note: str) -> bool:
+        try:
+            self._q(
+                "INSERT INTO promos (code, percent, note, created_at) VALUES (?, ?, ?, ?)",
+                (code, percent, note, int(time.time())),
+            )
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def update_promo(self, code: str, percent: int, active: bool, note: str) -> None:
+        self._q(
+            "UPDATE promos SET percent = ?, active = ?, note = ? WHERE code = ?",
+            (percent, int(active), note, code),
+        )
+
+    def promo_visit(self, code: str, unique: bool) -> None:
+        self._q(
+            "UPDATE promos SET visits = visits + 1, uniques = uniques + ? WHERE code = ?",
+            (int(unique), code),
+        )
+
+    def promos_with_stats(self) -> list[dict[str, Any]]:
+        rows = self._q(
+            """SELECT p.*,
+                      COUNT(pay.uuid) AS checkouts,
+                      COALESCE(SUM(pay.status = 'paid'), 0) AS paid,
+                      COALESCE(SUM(CASE WHEN pay.status = 'paid' THEN CAST(pay.amount AS REAL) END), 0) AS revenue
+               FROM promos p LEFT JOIN payments pay ON pay.promo = p.code
+               GROUP BY p.code ORDER BY p.created_at DESC"""
+        )
+        return [dict(r) for r in rows]
 
     def open_payment(self, book_id: str, max_age: int) -> dict[str, Any] | None:
         """Последний неоплаченный платёж книги — чтобы не плодить счета при повторном нажатии."""

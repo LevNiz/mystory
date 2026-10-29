@@ -35,6 +35,9 @@ class Settings:
     urlpay_paid_statuses: frozenset[str]
     urlpay_failed_statuses: frozenset[str]
 
+    admin_path: str
+    admin_password: str
+
     @property
     def ai_enabled(self) -> bool:
         return bool(self.ai_base_url and self.ai_api_key)
@@ -66,4 +69,7 @@ def load_settings() -> Settings:
         # 3 обработан (оплачен), 4 ошибка, 5–6 холд.
         urlpay_paid_statuses=_codes("URLPAY_PAID_STATUSES", "3"),
         urlpay_failed_statuses=_codes("URLPAY_FAILED_STATUSES", "2,4"),
+        # Админка: скрытый адрес и пароль. Пустые — админка выключена.
+        admin_path=_env("ADMIN_PATH").strip("/"),
+        admin_password=_env("ADMIN_PASSWORD"),
     )

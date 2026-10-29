@@ -20,6 +20,12 @@
   let state = emptyData();
   let server = { paid: false, exists: false, ai: {}, photos: {}, features: { ai: false, payments: false, price: '1490.00' } };
   let PRICE = '1 490 ₽';
+  let BASE_PRICE = PRICE;
+  let PROMO = null; // { code, percent } — если человек пришёл по ссылке с промокодом
+  const rub = (v) => `${Number(v).toLocaleString('ru-RU')} ₽`;
+  // Цена с учётом промокода: зачёркнутая старая + новая.
+  const priceHtml = () => (PROMO ? `<strong>${PRICE}</strong><s>${BASE_PRICE}</s>` : `<strong>${PRICE}</strong>`);
+  const promoNote = () => (PROMO ? `<p class="promo-note">${icon.spark} Промокод ${esc(PROMO.code)}: скидка ${PROMO.percent}% на полную книгу</p>` : '');
 
   async function api(method, url, body) {
     const opts = { method, credentials: 'same-origin', headers: {} };
@@ -42,7 +48,9 @@
   async function loadState() {
     const s = await api('GET', '/api/state');
     server = { paid: s.paid, exists: s.exists, ai: s.ai || {}, photos: s.photos || {}, features: s.features };
-    PRICE = `${Number(s.features.price).toLocaleString('ru-RU')} ₽`;
+    PRICE = rub(s.features.price);
+    BASE_PRICE = rub(s.features.basePrice || s.features.price);
+    PROMO = s.features.promo || null;
     const d = s.data || {};
     const base = emptyData();
     state = { ...base, ...d, profile: { ...base.profile, ...d.profile }, book: { ...base.book, ...d.book, aiSig: { ...(d.book && d.book.aiSig) } } };
@@ -219,7 +227,7 @@
     <section class="hero">
       ${aura(24, 'aura--hero-a')}${aura(265, 'aura--hero-b')}${aura(165, 'aura--hero-c')}
       <div class="hero__copy">
-        <p class="pill">${icon.spark} 12 вопросов — бесплатно</p>
+        <p class="pill">${icon.spark} ${PROMO ? `Промокод ${esc(PROMO.code)}: −${PROMO.percent}% на полную книгу` : '12 вопросов — бесплатно'}</p>
         <h1>Интервью <em>с самим собой</em></h1>
         <p class="hero__sub">Твоя автобиография за один час</p>
         <p class="hero__text">Ответь на несколько вопросов — голосом или текстом — и мы соберём полноценную автобиографию всей твоей жизни.</p>
@@ -308,7 +316,8 @@
         <article class="plan plan--main">
           ${aura(24, 'aura--plan')}
           <h3 class="plan__name">Полная книга моей жизни <span class="tag">единоразово</span></h3>
-          <p class="plan__price"><strong>${PRICE}</strong><span>без подписки</span></p>
+          <p class="plan__price">${priceHtml()}<span>без подписки</span></p>
+          ${promoNote()}
           <ul class="checks">
             <li>${icon.check} 10 глав и 94 вопроса</li>
             <li>${icon.check} Уточняющие вопросы для важных историй</li>
@@ -373,7 +382,8 @@
             <li>${icon.check} PDF для сохранения и печати</li>
           </ul>
           <form class="offer__buy" id="buy-form" novalidate>
-            <p class="plan__price"><strong>${PRICE}</strong><span>единоразово</span></p>
+            <p class="plan__price">${priceHtml()}<span>единоразово</span></p>
+            ${promoNote()}
             <p class="offer__note">Без подписки. Твои ответы бесплатной части уже войдут в книгу.</p>
             <label class="offer__email">E-mail для чека
               <input type="email" id="buy-email" name="email" autocomplete="email" inputmode="email" required placeholder="you@example.ru" value="${esc(state.profile.email || '')}">

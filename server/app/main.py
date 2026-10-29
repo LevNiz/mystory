@@ -23,10 +23,12 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from .admin import build_router as admin_router
 from .ai import AIBusy, AIClient, AIError
 from .config import load_settings
 from .content import Content, gendered
 from .db import Database
+from .pricing import PROMO_COOKIE, normalize_code, quote
 from .urlpay import UrlPay, verdict
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -214,8 +216,12 @@ def public_state(book: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def features() -> dict[str, Any]:
-    return {"ai": bool(ai), "payments": bool(urlpay), "price": settings.price_rub}
+def price_quote(request: Request) -> dict[str, Any]:
+    return quote(db, settings.price_rub, request.cookies.get(PROMO_COOKIE))
+
+
+def features(request: Request) -> dict[str, Any]:
+    return {"ai": bool(ai), "payments": bool(urlpay), **price_quote(request)}
 
 
 # ---------- Книга ----------
@@ -224,7 +230,7 @@ def features() -> dict[str, Any]:
 @app.get("/api/state")
 async def get_state(request: Request) -> dict[str, Any]:
     book = await asyncio.to_thread(current_book, request)
-    return {**public_state(book), "features": features()}
+    return {**public_state(book), "features": features(request)}
 
 
 @app.put("/api/state")
@@ -459,9 +465,13 @@ async def pay(request: Request) -> dict[str, Any]:
     if len(email) > 120 or not EMAIL.match(email):
         raise HTTPException(status_code=400, detail="bad_email")
 
+    offer = await asyncio.to_thread(price_quote, request)
+    amount = offer["price"]
+    promo_code = offer["promo"]["code"] if offer["promo"] else None
+
     # Повторное нажатие в течение 15 минут возвращает тот же счёт, если цена и e-mail не менялись.
     existing = await asyncio.to_thread(db.open_payment, book["id"], 15 * 60)
-    if existing and existing.get("email") == email and existing["amount"] == settings.price_rub and existing.get("qr_link"):
+    if existing and existing.get("email") == email and existing["amount"] == amount and existing.get("qr_link"):
         return {"paid": False, "checkout": checkout(existing)}
 
     rate(f"pay:{book['id']}", 3600, PAYMENTS_PER_BOOK_HOUR)
@@ -469,7 +479,7 @@ async def pay(request: Request) -> dict[str, Any]:
     try:
         created = await urlpay.create(
             payment_uuid,
-            settings.price_rub,
+            amount,
             PAYMENT_DESCRIPTION,
             f"{settings.public_url}/pay/return",
             email,
@@ -479,9 +489,21 @@ async def pay(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail="payment_failed") from None
     sbp = await urlpay.sbp_link(created.url)
     await asyncio.to_thread(
-        db.add_payment, payment_uuid, book["id"], created.payment_id, settings.price_rub, email, created.url, sbp
+        db.add_payment,
+        payment_uuid,
+        book["id"],
+        created.payment_id,
+        amount,
+        email,
+        created.url,
+        sbp,
+        promo_code,
+        offer["basePrice"],
     )
-    log.info("payment_created book=%s uuid=%s provider_id=%s sbp=%s", book["id"], payment_uuid, created.payment_id, bool(sbp))
+    log.info(
+        "payment_created book=%s uuid=%s provider_id=%s amount=%s promo=%s sbp=%s",
+        book["id"], payment_uuid, created.payment_id, amount, promo_code, bool(sbp),
+    )
     payment = await asyncio.to_thread(db.payment, payment_uuid)
     return {"paid": False, "checkout": checkout(payment)}  # type: ignore[arg-type]
 
@@ -521,9 +543,41 @@ async def urlpay_webhook(request: Request) -> Response:
     return Response("ok")
 
 
+@app.get("/p/{code}")
+async def promo_link(code: str, request: Request) -> Response:
+    """Ссылка с промокодом: считаем переход, запоминаем код в cookie и ведём на главную."""
+    normalized = normalize_code(code)
+    promo = await asyncio.to_thread(db.promo, normalized) if normalized else None
+    response = RedirectResponse("/#/", status_code=302)
+    if promo and promo["active"]:
+        unique = request.cookies.get(PROMO_COOKIE) != promo["code"]
+        await asyncio.to_thread(db.promo_visit, promo["code"], unique)
+        response.set_cookie(
+            PROMO_COOKIE, promo["code"], max_age=30 * DAY, httponly=True, secure=settings.cookie_secure, samesite="lax", path="/"
+        )
+    response.headers["X-Robots-Tag"] = "noindex"
+    return response
+
+
 @app.get("/pay/return")
 async def pay_return() -> Response:
     return RedirectResponse("/#/paid", status_code=302)
+
+
+# ---------- Админка ----------
+
+if settings.admin_path and len(settings.admin_password) >= 12:
+    app.include_router(
+        admin_router(
+            path=settings.admin_path,
+            password=settings.admin_password,
+            public_url=settings.public_url,
+            db=db,
+            default_price=settings.price_rub,
+            secure=settings.cookie_secure,
+            rate=rate,
+        )
+    )
 
 
 # ---------- Сайт ----------
