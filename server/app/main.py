@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import segno
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -58,6 +59,7 @@ PAYMENTS_PER_BOOK_HOUR = 10
 
 PAYMENT_DESCRIPTION = "Полная книга моей жизни"
 CHAPTER_ID = re.compile(r"^[a-z]{2,12}$")
+EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 QUESTION_ID = re.compile(r"^[a-z0-9-]{2,20}$")
 
 
@@ -430,6 +432,21 @@ async def check_payment(payment: dict[str, Any]) -> str:
     return result
 
 
+def checkout(payment: dict[str, Any]) -> dict[str, Any]:
+    """Данные для нашей страницы оплаты: сумма, e-mail для чека, ссылка СБП и QR."""
+    qr_svg = None
+    if payment.get("qr_link"):
+        qr_svg = segno.make(payment["qr_link"], error="m").svg_data_uri(scale=6, border=2, dark="#16171b")
+    return {
+        "amount": payment["amount"],
+        "email": payment.get("email") or "",
+        "sbpLink": payment.get("qr_link"),
+        "qr": qr_svg,
+        "payUrl": payment.get("pay_url"),
+        "createdAt": payment["created_at"],
+    }
+
+
 @app.post("/api/pay")
 async def pay(request: Request) -> dict[str, Any]:
     book = require_book(request)
@@ -437,6 +454,16 @@ async def pay(request: Request) -> dict[str, Any]:
         return {"paid": True}
     if urlpay is None:
         raise HTTPException(status_code=503, detail="payments_disabled")
+    body = await read_json(request)
+    email = str(body.get("email") or "").strip().lower()
+    if len(email) > 120 or not EMAIL.match(email):
+        raise HTTPException(status_code=400, detail="bad_email")
+
+    # Повторное нажатие в течение 15 минут возвращает тот же счёт, если цена и e-mail не менялись.
+    existing = await asyncio.to_thread(db.open_payment, book["id"], 15 * 60)
+    if existing and existing.get("email") == email and existing["amount"] == settings.price_rub and existing.get("qr_link"):
+        return {"paid": False, "checkout": checkout(existing)}
+
     rate(f"pay:{book['id']}", 3600, PAYMENTS_PER_BOOK_HOUR)
     payment_uuid = str(uuid_lib.uuid4())
     try:
@@ -445,13 +472,27 @@ async def pay(request: Request) -> dict[str, Any]:
             settings.price_rub,
             PAYMENT_DESCRIPTION,
             f"{settings.public_url}/pay/return",
+            email,
         )
     except Exception as exc:  # noqa: BLE001
         log.error("urlpay_create_error book=%s error=%s", book["id"], exc)
         raise HTTPException(status_code=502, detail="payment_failed") from None
-    await asyncio.to_thread(db.add_payment, payment_uuid, book["id"], created.payment_id, settings.price_rub)
-    log.info("payment_created book=%s uuid=%s provider_id=%s", book["id"], payment_uuid, created.payment_id)
-    return {"paid": False, "url": created.url}
+    sbp = await urlpay.sbp_link(created.url)
+    await asyncio.to_thread(
+        db.add_payment, payment_uuid, book["id"], created.payment_id, settings.price_rub, email, created.url, sbp
+    )
+    log.info("payment_created book=%s uuid=%s provider_id=%s sbp=%s", book["id"], payment_uuid, created.payment_id, bool(sbp))
+    payment = await asyncio.to_thread(db.payment, payment_uuid)
+    return {"paid": False, "checkout": checkout(payment)}  # type: ignore[arg-type]
+
+
+@app.get("/api/pay/current")
+async def pay_current(request: Request) -> dict[str, Any]:
+    book = require_book(request)
+    if book["paid"]:
+        return {"paid": True, "checkout": None}
+    payment = await asyncio.to_thread(db.open_payment, book["id"], 60 * 60)
+    return {"paid": False, "checkout": checkout(payment) if payment and payment.get("pay_url") else None}
 
 
 @app.post("/api/pay/check")

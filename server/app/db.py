@@ -59,6 +59,12 @@ class Database:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(SCHEMA)
+            # Колонки, добавленные после первого запуска.
+            for column in ("email TEXT", "pay_url TEXT", "qr_link TEXT"):
+                try:
+                    self._conn.execute(f"ALTER TABLE payments ADD COLUMN {column}")
+                except sqlite3.OperationalError:
+                    pass
 
     def _q(self, sql: str, args: tuple[Any, ...] = ()) -> list[sqlite3.Row]:
         with self._lock:
@@ -125,13 +131,24 @@ class Database:
 
     # --- Платежи ---
 
-    def add_payment(self, uuid: str, book_id: str, provider_id: int, amount: str) -> None:
+    def add_payment(
+        self, uuid: str, book_id: str, provider_id: int, amount: str, email: str, pay_url: str, qr_link: str | None
+    ) -> None:
         now = int(time.time())
         self._q(
-            "INSERT INTO payments (uuid, book_id, provider_id, amount, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (uuid, book_id, provider_id, amount, now, now),
+            "INSERT INTO payments (uuid, book_id, provider_id, amount, email, pay_url, qr_link, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (uuid, book_id, provider_id, amount, email, pay_url, qr_link, now, now),
         )
+
+    def open_payment(self, book_id: str, max_age: int) -> dict[str, Any] | None:
+        """Последний неоплаченный платёж книги — чтобы не плодить счета при повторном нажатии."""
+        rows = self._q(
+            "SELECT * FROM payments WHERE book_id = ? AND status = 'pending' AND created_at > ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (book_id, int(time.time()) - max_age),
+        )
+        return dict(rows[0]) if rows else None
 
     def payment(self, uuid: str) -> dict[str, Any] | None:
         rows = self._q("SELECT * FROM payments WHERE uuid = ?", (uuid,))

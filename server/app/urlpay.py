@@ -7,10 +7,14 @@
 from __future__ import annotations
 
 import hashlib
+import html
+import json
 import logging
+import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 
@@ -46,7 +50,8 @@ class UrlPay:
         raw = f"{currency}{amount}{self._shop_id}{self._secret_key}"
         return hashlib.sha1(raw.encode()).hexdigest()
 
-    async def create(self, uuid: str, amount: str, description: str, website_url: str) -> Created:
+    async def create(self, uuid: str, amount: str, description: str, website_url: str, client: str) -> Created:
+        """`client` — e-mail покупателя: на него UrlPay отправит чек (по спецификации OpenAPI)."""
         currency = "rub"
         payload: dict[str, object] = {
             "currency": currency,
@@ -54,6 +59,7 @@ class UrlPay:
             "uuid": uuid,
             "shopId": self._shop_id,
             "description": description,
+            "client": client,
             "website_url": website_url,
             "language": "ru",
             "items": [
@@ -89,6 +95,36 @@ class UrlPay:
         if not isinstance(payment, dict):
             raise RuntimeError("urlpay_invalid_payment")
         return payment
+
+
+    async def sbp_link(self, payment_url: str) -> str | None:
+        """Ссылка СБП для оплаты прямо с нашей страницы, без перехода на сайт UrlPay.
+
+        Публичного метода API для этого нет, поэтому повторяем то, что делает их платёжная форма:
+        открываем её и запрашиваем QR СБП. При любой ошибке возвращаем None — тогда покупатель
+        уйдёт на обычную страницу оплаты UrlPay.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+                page = await client.get(payment_url, headers={"Accept": "text/html"})
+                match = re.search(r'data-page="([^"]+)"', page.text)
+                if page.status_code != 200 or not match:
+                    return None
+                data = json.loads(html.unescape(match.group(1)))
+                payment_key = data["props"]["payment"]["uuid"]
+                xsrf = unquote(client.cookies.get("XSRF-TOKEN") or "")
+                resp = await client.get(
+                    f"https://urlpay.io/payment/widget/{payment_key}/sbp",
+                    headers={"Accept": "application/json", "X-Requested-With": "XMLHttpRequest", "X-XSRF-TOKEN": xsrf},
+                )
+            body = resp.json()
+            data = body.get("data") or {}
+            # Ссылка СБП (qr.nspk.ru) приходит в qrpayload; qrlink бывает пустым.
+            link = str(data.get("qrpayload") or data.get("qrlink") or "")
+            return link if body.get("success") and link.startswith("https://") else None
+        except Exception as exc:  # noqa: BLE001
+            log.warning("urlpay_sbp_failed error=%s", exc)
+            return None
 
 
 def verdict(

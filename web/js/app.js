@@ -10,7 +10,7 @@
   // Статус оплаты знает только сервер.
 
   const emptyData = () => ({
-    profile: { name: '', gender: 'm' },
+    profile: { name: '', gender: 'm', email: '' },
     answers: {},
     book: { title: '', dedication: '', style: 'answers', aiSig: {} },
     last: null,
@@ -372,74 +372,121 @@
             <li>${icon.check} Название книги и посвящение</li>
             <li>${icon.check} PDF для сохранения и печати</li>
           </ul>
-          <div class="offer__buy">
+          <form class="offer__buy" id="buy-form" novalidate>
             <p class="plan__price"><strong>${PRICE}</strong><span>единоразово</span></p>
             <p class="offer__note">Без подписки. Твои ответы бесплатной части уже войдут в книгу.</p>
-            <button type="button" class="btn btn--dark btn--lg btn--block" id="buy" ${server.paid ? 'disabled' : ''}>${server.paid ? 'Уже оплачено' : `Оплатить ${PRICE}`} ${icon.arrow}</button>
-            <p class="offer__legal">Нажимая «Оплатить», ты принимаешь <a href="/terms.html" target="_blank" rel="noopener">условия оферты</a>.</p>
-          </div>
+            <label class="offer__email">E-mail для чека
+              <input type="email" id="buy-email" name="email" autocomplete="email" inputmode="email" required placeholder="you@example.ru" value="${esc(state.profile.email || '')}">
+            </label>
+            <p class="offer__error" id="buy-error" role="alert" hidden></p>
+            <button type="submit" class="btn btn--dark btn--lg btn--block" id="buy" ${server.paid ? 'disabled' : ''}>${server.paid ? 'Уже оплачено' : `Оплатить ${PRICE}`} ${icon.arrow}</button>
+            <p class="offer__legal">Нажимая «Оплатить», ты принимаешь <a href="/terms.html" target="_blank" rel="noopener">условия оферты</a> и <a href="/privacy.html" target="_blank" rel="noopener">политику конфиденциальности</a>. Чек придёт на указанный e-mail.</p>
+          </form>
         </div>
       </main>
     </div>`;
 
-    document.getElementById('buy').addEventListener('click', async (e) => {
-      const btn = e.currentTarget;
+    const form = document.getElementById('buy-form');
+    const emailInput = document.getElementById('buy-email');
+    const error = document.getElementById('buy-error');
+    const showError = (text) => { error.textContent = text; error.hidden = !text; emailInput.setAttribute('aria-invalid', String(Boolean(text))); };
+    emailInput.addEventListener('input', () => showError(''));
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('buy');
+      const email = emailInput.value.trim();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { showError('Проверь e-mail — на него придёт чек.'); emailInput.focus(); return; }
       track('buy_click');
+      state.profile.email = email;
       btn.disabled = true;
-      btn.textContent = 'Переходим к оплате…';
+      btn.textContent = 'Готовим оплату…';
       try {
         await flush();
         if (!server.exists) await api('PUT', '/api/state', { data: state }).then(() => { server.exists = true; });
-        const res = await api('POST', '/api/pay');
+        const res = await api('POST', '/api/pay', { email });
         if (res.paid) { server.paid = true; go('#/full'); return; }
-        location.href = res.url;
+        checkoutData = res.checkout;
+        go('#/checkout');
       } catch (err) {
         btn.disabled = false;
         btn.innerHTML = `Оплатить ${PRICE} ${icon.arrow}`;
-        toast(err.message === 'payments_disabled' ? 'Оплата временно недоступна — попробуй чуть позже.' : 'Не получилось создать платёж. Попробуй ещё раз.');
+        if (err.message === 'bad_email') showError('Проверь e-mail — на него придёт чек.');
+        else toast(err.message === 'payments_disabled' ? 'Оплата временно недоступна — попробуй чуть позже.' : 'Не получилось создать платёж. Попробуй ещё раз.');
       }
     });
   }
 
-  // Возврат с оплаты: спрашиваем сервер, подтвердил ли UrlPay платёж.
-  function renderPaid() {
+  // ---------- Оплата на нашей странице ----------
+  // Платёж создаёт сервер; здесь — ссылка СБП (на телефоне) и QR (на компьютере),
+  // а статус спрашиваем у сервера, который сверяется с UrlPay.
+
+  let checkoutData = null;
+  const isMobile = () => window.matchMedia('(max-width: 760px), (pointer: coarse)').matches;
+
+  async function renderCheckout() {
+    if (server.paid) return renderPaidDone();
+    app.innerHTML = `
+    <div class="offer">
+      ${aura(205, 'aura--offer-a')}
+      <header class="offer__bar">${logo()}<a class="btn btn--ghost btn--sm" href="#/offer">${icon.back}<span class="hide-sm">Назад</span></a></header>
+      <main class="offer__card checkout" id="checkout"><div class="spinner" aria-hidden="true"></div></main>
+    </div>`;
+    if (!checkoutData) {
+      try { checkoutData = (await api('GET', '/api/pay/current')).checkout; } catch (e) { checkoutData = null; }
+    }
+    const box = document.getElementById('checkout');
+    if (!box) return;
+    if (!checkoutData) { go('#/offer'); return; }
+    const c = checkoutData;
+    const amount = `${Number(c.amount).toLocaleString('ru-RU')} ₽`;
+    const mobile = isMobile();
+    box.innerHTML = `
+      <p class="eyebrow">Полная книга моей жизни</p>
+      <h1>Оплата ${amount}</h1>
+      ${c.sbpLink ? `
+        <div class="checkout__grid">
+          ${mobile ? '' : `<figure class="checkout__qr"><img src="${c.qr}" width="220" height="220" alt="QR-код для оплаты через СБП"><figcaption>Наведи камеру телефона или открой QR в приложении банка</figcaption></figure>`}
+          <div class="checkout__side">
+            <p class="checkout__lead">${mobile ? 'Оплата через СБП — откроется приложение твоего банка.' : 'Отсканируй QR-код — оплата пройдёт через СБП в приложении банка.'}</p>
+            <a class="btn btn--dark btn--lg btn--block" href="${esc(c.sbpLink)}" rel="noopener">${mobile ? 'Оплатить в приложении банка' : 'Открыть ссылку СБП'} ${icon.arrow}</a>
+            <p class="checkout__fine">Чек придёт на ${esc(c.email)}.</p>
+          </div>
+        </div>` : `
+        <p class="checkout__lead">Платёж создан. Осталось подтвердить оплату на защищённой странице платёжного сервиса.</p>
+        <a class="btn btn--dark btn--lg" href="${esc(c.payUrl)}" rel="noopener">Перейти к оплате ${icon.arrow}</a>`}
+      <div class="checkout__status" role="status" aria-live="polite"><span class="dot-pulse" aria-hidden="true"></span><span id="pay-status">Ждём подтверждения оплаты…</span></div>
+      ${c.sbpLink ? `<p class="checkout__alt">Не получается? <a href="${esc(c.payUrl)}" rel="noopener">Оплатить на странице UrlPay</a></p>` : ''}`;
+    pollPayment('#/checkout');
+  }
+
+  function pollPayment(hash) {
+    let tries = 0;
+    const tick = async () => {
+      if (location.hash !== hash) return;
+      tries++;
+      try {
+        const res = await api('POST', '/api/pay/check');
+        if (res.paid) { server.paid = true; checkoutData = null; track('paid'); flush(); renderPaidDone(); return; }
+      } catch (e) { /* повторим */ }
+      const status = document.getElementById('pay-status');
+      if (status && tries > 100) status.textContent = 'Если деньги уже списались, подтверждение придёт в течение пары минут — можно обновить страницу.';
+      setTimeout(tick, tries < 60 ? 3000 : 10000);
+    };
+    tick();
+  }
+
+  function renderPaidDone() {
     app.innerHTML = `
     <div class="offer">
       ${aura(160, 'aura--offer-a')}
       <header class="offer__bar">${logo()}</header>
       <main class="offer__card offer__card--center">
-        <div class="spinner" aria-hidden="true"></div>
-        <h1 id="paid-title">Проверяем оплату…</h1>
-        <p class="offer__text" id="paid-text">Обычно это занимает несколько секунд.</p>
-        <div id="paid-actions"></div>
+        <p class="lost__code">Готово</p>
+        <h1>Оплата прошла — спасибо!</h1>
+        <p class="offer__text">Полная книга открыта. Твои ответы бесплатной части уже в ней.</p>
+        <a class="btn btn--dark btn--lg" href="#/full">Продолжить книгу ${icon.arrow}</a>
       </main>
     </div>`;
-    let tries = 0;
-    const check = async () => {
-      if (location.hash !== '#/paid') return;
-      tries++;
-      try {
-        const res = await api('POST', '/api/pay/check');
-        if (res.paid) {
-          server.paid = true;
-          track('paid');
-          flush();
-          document.querySelector('.spinner').remove();
-          document.getElementById('paid-title').textContent = 'Оплата прошла — спасибо!';
-          document.getElementById('paid-text').textContent = 'Полная книга открыта. Твои 12 ответов уже в ней.';
-          document.getElementById('paid-actions').innerHTML = `<a class="btn btn--dark btn--lg" href="#/full">Продолжить книгу ${icon.arrow}</a>`;
-          return;
-        }
-      } catch (e) { /* повторим */ }
-      if (tries < 40) setTimeout(check, 3000);
-      else {
-        document.querySelector('.spinner').remove();
-        document.getElementById('paid-title').textContent = 'Пока не видим оплату';
-        document.getElementById('paid-text').textContent = 'Если деньги списались, подожди пару минут и обнови страницу — платёж подтвердится автоматически.';
-        document.getElementById('paid-actions').innerHTML = `<a class="btn btn--ghost btn--lg" href="#/offer">Вернуться</a>`;
-      }
-    };
-    check();
   }
 
   // ---------- Интервью ----------
@@ -1139,8 +1186,10 @@
       document.title = TITLES.offer;
       renderOffer();
       window.scrollTo(0, 0);
-    } else if (hash === '#/paid') {
-      renderPaid();
+    } else if (hash === '#/paid' || hash === '#/checkout') {
+      if (hash === '#/paid') { location.replace('#/checkout'); return; }
+      document.title = 'Оплата — Книга моей жизни';
+      renderCheckout();
     } else if (hash === '#/book' || hash === '#/example') {
       document.title = hash === '#/book' ? TITLES.book : TITLES.example;
       renderBook(hash === '#/example');
