@@ -61,6 +61,21 @@ CHAPTER_ID = re.compile(r"^[a-z]{2,12}$")
 QUESTION_ID = re.compile(r"^[a-z0-9-]{2,20}$")
 
 
+async def payment_watcher() -> None:
+    """Раз в минуту спрашиваем UrlPay о свежих неоплаченных платежах.
+
+    Уведомления магазина уходят на адрес wgpt_bot, поэтому оплату подтверждаем сами —
+    даже если человек закрыл вкладку сразу после оплаты.
+    """
+    while True:
+        await asyncio.sleep(60)
+        try:
+            for payment in await asyncio.to_thread(db.recent_pending, 2 * DAY):
+                await check_payment(payment)
+        except Exception:  # noqa: BLE001
+            log.exception("payment_watcher_failed")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global ai
@@ -73,7 +88,10 @@ async def lifespan(_: FastAPI):
             settings.ai_max_concurrent,
         )
     log.info("start ai=%s payments=%s", bool(ai), bool(urlpay))
+    watcher = asyncio.create_task(payment_watcher()) if urlpay else None
     yield
+    if watcher:
+        watcher.cancel()
     if ai:
         await ai.close()
 

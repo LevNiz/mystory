@@ -101,8 +101,8 @@ def verdict(
 ) -> str:
     """'paid' | 'failed' | 'pending' | 'mismatch' по данным самого UrlPay.
 
-    Наш uuid UrlPay хранит в `external_id` (в `uuid` — их собственный). Статус в API числовой
-    (0 — создан); какие коды означают оплату/отмену, задаётся в .env (URLPAY_PAID_STATUSES).
+    Наш uuid UrlPay хранит в `external_id` (в `uuid` — их собственный). Статус в API числовой:
+    3 — обработан (оплачен), 2 — отменён, 4 — ошибка (см. настройки URLPAY_*_STATUSES).
     """
     our_id = str(payment.get("external_id") or payment.get("uuid") or "")
     if our_id != uuid or int(payment.get("id") or 0) != payment_id:

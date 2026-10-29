@@ -11,6 +11,10 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+def _codes(name: str, default: str) -> frozenset[str]:
+    return frozenset(x.strip() for x in (_env(name) or default).split(",") if x.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
     public_url: str
@@ -58,7 +62,8 @@ def load_settings() -> Settings:
         urlpay_secret_key=_env("URLPAY_SECRET_KEY"),
         urlpay_shop_id=int(_env("URLPAY_SHOP_ID", "0") or 0),
         price_rub=_env("PRICE_RUB", "1490.00"),
-        # Числовые коды статуса UrlPay (0 — создан). Пока коды не заданы, оплата не подтверждается автоматически.
-        urlpay_paid_statuses=frozenset(x.strip() for x in _env("URLPAY_PAID_STATUSES").split(",") if x.strip()),
-        urlpay_failed_statuses=frozenset(x.strip() for x in _env("URLPAY_FAILED_STATUSES").split(",") if x.strip()),
+        # Коды поля status из спецификации UrlPay: 0 создан, 1 в обработке, 2 отменён,
+        # 3 обработан (оплачен), 4 ошибка, 5–6 холд.
+        urlpay_paid_statuses=_codes("URLPAY_PAID_STATUSES", "3"),
+        urlpay_failed_statuses=_codes("URLPAY_FAILED_STATUSES", "2,4"),
     )

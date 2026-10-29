@@ -145,6 +145,13 @@ class Database:
         )
         return [dict(r) for r in rows]
 
+    def recent_pending(self, max_age: int) -> list[dict[str, Any]]:
+        rows = self._q(
+            "SELECT * FROM payments WHERE status = 'pending' AND created_at > ? ORDER BY created_at DESC LIMIT 50",
+            (int(time.time()) - max_age,),
+        )
+        return [dict(r) for r in rows]
+
     def set_payment_status(self, uuid: str, status: str) -> None:
         self._q(
             "UPDATE payments SET status = ?, updated_at = ? WHERE uuid = ?",
