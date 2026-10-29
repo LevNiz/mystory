@@ -1,0 +1,29 @@
+# Сервер книги. Публичных портов нет: трафик приходит через общий nginx проекта wgpt_bot
+# по его docker-сети (имя сети задаётся в .env как EDGE_NETWORK).
+services:
+  api:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    image: mystory_api
+    container_name: mystory_api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      COOKIE_SECURE: "1"
+    volumes:
+      - mystory_data:/data
+    networks:
+      edge:
+        aliases: [mystory_api]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+networks:
+  edge:
+    external: true
+    name: ${EDGE_NETWORK:-wgpt_bot_internal}
+
+volumes:
+  mystory_data:

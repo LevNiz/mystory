@@ -1,59 +1,91 @@
 (() => {
   'use strict';
 
-  const TRACKS = { free: window.FREE, full: window.FULL };
+  const TRACKS = { free: window.QUESTIONS.free, full: window.QUESTIONS.full };
   const FOLLOW_UPS = window.FOLLOW_UPS;
-  const PRICE = '1 490 ₽';
-  const STORAGE_KEY = 'mystory.v2';
   const app = document.getElementById('app');
 
-  // ---------- Хранилище ----------
-  // Всё (ответы, фото, настройки книги, место, где остановился) лежит в localStorage
-  // и сохраняется на каждый ввод — можно закрыть вкладку и вернуться.
+  // ---------- Состояние и синхронизация с сервером ----------
+  // Книга хранится на сервере и привязана к httpOnly-cookie. В браузере — только копия в памяти.
+  // Статус оплаты знает только сервер.
 
-  const emptyState = () => ({
+  const emptyData = () => ({
     profile: { name: '', gender: 'm' },
     answers: {},
-    photos: {},
-    book: { title: '', dedication: '' },
-    paid: false,
+    book: { title: '', dedication: '', style: 'answers', aiSig: {} },
     last: null,
     events: [],
-    updatedAt: null,
   });
 
-  function loadState() {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return emptyState();
-      const s = Object.assign(emptyState(), JSON.parse(raw));
-      s.book = Object.assign(emptyState().book, s.book);
-      return s;
-    } catch (e) {
-      return emptyState();
+  let state = emptyData();
+  let server = { paid: false, exists: false, ai: {}, photos: {}, features: { ai: false, payments: false, price: '1490.00' } };
+  let PRICE = '1 490 ₽';
+
+  async function api(method, url, body) {
+    const opts = { method, credentials: 'same-origin', headers: {} };
+    if (method !== 'GET') opts.headers['X-Requested-With'] = 'mystory';
+    if (body !== undefined) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
     }
+    const res = await fetch(url, opts);
+    let data = null;
+    try { data = await res.json(); } catch (e) { /* пустой ответ */ }
+    if (!res.ok) {
+      const err = new Error((data && data.error) || `http_${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+    return data;
   }
 
-  let state = loadState();
+  async function loadState() {
+    const s = await api('GET', '/api/state');
+    server = { paid: s.paid, exists: s.exists, ai: s.ai || {}, photos: s.photos || {}, features: s.features };
+    PRICE = `${Number(s.features.price).toLocaleString('ru-RU')} ₽`;
+    const d = s.data || {};
+    const base = emptyData();
+    state = { ...base, ...d, profile: { ...base.profile, ...d.profile }, book: { ...base.book, ...d.book, aiSig: { ...(d.book && d.book.aiSig) } } };
+  }
+
+  // Сохраняем пачкой через полсекунды после последнего изменения.
+  let saveTimer = null;
+  let saving = Promise.resolve();
+  let dirty = false;
 
   function save() {
-    state.updatedAt = Date.now();
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-      flashSaved();
-      return true;
-    } catch (e) {
-      toast('Не удалось сохранить — возможно, фотографии слишком большие.');
-      return false;
-    }
+    dirty = true;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(flush, 600);
   }
 
-  // Ответы из другой вкладки подхватываем, чтобы не затереть их старой копией.
-  window.addEventListener('storage', (e) => {
-    if (e.key === STORAGE_KEY) { state = loadState(); route(); }
+  function flush() {
+    clearTimeout(saveTimer);
+    if (!dirty) return saving;
+    dirty = false;
+    const body = { data: state };
+    saving = saving
+      .then(() => api('PUT', '/api/state', body))
+      .then(() => { server.exists = true; flashSaved(); })
+      .catch((e) => {
+        dirty = true;
+        if (e.status === 413) toast('Слишком много текста для одной книги — сократи пару ответов.');
+        else toast('Не удалось сохранить — проверь интернет. Попробуем ещё раз.');
+        saveTimer = setTimeout(flush, 5000);
+      });
+    return saving;
+  }
+
+  // При закрытии вкладки отправляем несохранённое (keepalive переживает закрытие страницы).
+  window.addEventListener('pagehide', () => {
+    if (!dirty) return;
+    const body = JSON.stringify({ data: state });
+    if (body.length < 60000) {
+      fetch('/api/state', { method: 'PUT', keepalive: true, credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mystory' }, body });
+    }
   });
 
-  // Событие пишем локально и отправляем целью в Метрику (если счётчик подключён).
+  // Событие пишем в книгу и отправляем целью в Метрику (если счётчик подключён).
   function track(name) {
     state.events.push({ name, at: Date.now() });
     if (state.events.length > 200) state.events.shift();
@@ -90,11 +122,13 @@
   const answersWord = (n) => plural(n, 'ответ', 'ответа', 'ответов');
 
   function toast(text) {
+    document.querySelectorAll('.toast').forEach((t) => t.remove());
     const el = document.createElement('div');
     el.className = 'toast';
+    el.setAttribute('role', 'status');
     el.textContent = text;
     document.body.appendChild(el);
-    setTimeout(() => el.remove(), 3200);
+    setTimeout(() => el.remove(), 3600);
   }
 
   let savedTimer;
@@ -104,6 +138,13 @@
     el.classList.add('is-on');
     clearTimeout(savedTimer);
     savedTimer = setTimeout(() => el.classList.remove('is-on'), 1400);
+  }
+
+  // Короткая подпись ответов главы — чтобы понять, устарел ли литературный текст.
+  function signature(str) {
+    let h = 5381;
+    for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+    return (h >>> 0).toString(36);
   }
 
   const icon = {
@@ -117,6 +158,7 @@
     spark: '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l1.9 6.1L20 10l-6.1 1.9L12 18l-1.9-6.1L4 10l6.1-1.9z"/></svg>',
     pen: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16z"/></svg>',
     lock: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>',
+    link: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>',
   };
 
   const logo = () => `<a class="logo" href="#/"><span class="logo__mark">${icon.book}</span><span>Книга моей жизни</span></a>`;
@@ -143,8 +185,9 @@
   }
 
   function currentTrack() {
-    if (state.last && state.last.track === 'full' && state.paid) return 'full';
-    return answered('free') === total('free') && state.paid ? 'full' : 'free';
+    if (!server.paid) return 'free';
+    if (state.last && state.last.track === 'full') return 'full';
+    return freeDone() ? 'full' : 'free';
   }
 
   const freeDone = () => answered('free') === total('free');
@@ -157,7 +200,6 @@
     const [ci, qi] = resumeStep(t);
     const done = answered(t), all = total(t);
     const pct = Math.round((done / all) * 100);
-    const ctaText = started ? 'Продолжить' : 'Начать бесплатно';
 
     app.innerHTML = `
     <header class="nav" id="nav">
@@ -166,12 +208,14 @@
         <a href="#how">Как это работает</a>
         <a href="#chapters">Главы</a>
         <a href="#pricing">Цены</a>
+        <a href="#faq">Вопросы</a>
         <a href="#/example">Пример</a>
       </nav>
-      <a class="btn btn--dark btn--sm" href="#/interview">${ctaText}</a>
+      <a class="btn btn--dark btn--sm" href="#/interview">${started ? 'Продолжить' : 'Начать бесплатно'}</a>
       <button type="button" class="nav__burger" id="burger" aria-label="Меню" aria-expanded="false" aria-controls="nav-links"><span></span></button>
     </header>
 
+    <main>
     <section class="hero">
       ${aura(24, 'aura--hero-a')}${aura(265, 'aura--hero-b')}${aura(165, 'aura--hero-c')}
       <div class="hero__copy">
@@ -204,11 +248,11 @@
           <span class="demo-card__avatar">${icon.spark}</span>
           <p>Сколько тебе было лет и кто был рядом?</p>
         </div>
-        <div class="demo-book"><span>Автобиография</span><strong>Сергей Волков</strong><em>Моя история</em></div>
+        <div class="demo-book"><span>Автобиография</span><strong>Сергей Волков</strong><em>Мост через Оку</em></div>
       </div>
     </section>
 
-    <section class="stats">
+    <section class="stats" aria-label="Коротко">
       <div><strong>12</strong><span>вопросов бесплатно</span></div>
       <div><strong>94</strong><span>вопроса в полной книге</span></div>
       <div><strong>10</strong><span>глав жизни</span></div>
@@ -220,14 +264,14 @@
       <h2>Начни с короткой истории. Продолжи, когда захочешь.</h2>
       <ol class="path">
         <li><span>1</span><h3>Ответь на 12 вопросов</h3><p>Знакомство, детство, люди, повороты и настоящее. Голосом или текстом.</p></li>
-        <li><span>2</span><h3>Прочитай свою историю</h3><p>Короткая автобиография с названием и главами — бесплатно.</p></li>
+        <li><span>2</span><h3>Прочитай свою историю</h3><p>ИИ бережно соберёт ответы в связный текст — твоими словами.</p></li>
         <li><span>3</span><h3>Продолжи полную книгу</h3><p>10 глав и 94 вопроса в своём темпе. Ответы сохраняются.</p></li>
         <li><span>4</span><h3>Отредактируй и скачай</h3><p>Выбери истории, добавь фото и посвящение — и получи PDF.</p></li>
       </ol>
       <div class="principles">
         <div>${icon.check}<span>Отвечай в своём темпе</span></div>
         <div>${icon.check}<span>Любой вопрос можно пропустить</span></div>
-        <div>${icon.check}<span>Мы ничего не выдумываем — только твои слова</span></div>
+        <div>${icon.check}<span>ИИ ничего не выдумывает — только твои факты</span></div>
         <div>${icon.check}<span>Ты решаешь, какие истории войдут в книгу</span></div>
       </div>
     </section>
@@ -240,7 +284,7 @@
           <div class="chapter-card">
             ${aura(c.hue, 'aura--card')}
             <span class="chapter-card__num">${String(i + 1).padStart(2, '0')} · ${c.questions.length} ${plural(c.questions.length, 'вопрос', 'вопроса', 'вопросов')}</span>
-            <strong>${esc(g(c.title))}</strong>
+            <h3>${esc(g(c.title))}</h3>
             <span class="chapter-card__q">${esc(g(c.questions[0].title))}</span>
           </div>`).join('')}
       </div>
@@ -251,19 +295,19 @@
       <h2>Попробуй бесплатно. Плати один раз.</h2>
       <div class="plans">
         <article class="plan">
-          <p class="plan__name">Моя история</p>
+          <h3 class="plan__name">Моя история</h3>
           <p class="plan__price"><strong>0 ₽</strong></p>
           <ul class="checks">
             <li>${icon.check} 12 вопросов в 5 разделах</li>
             <li>${icon.check} Короткая автобиография с названием и главами</li>
-            <li>${icon.check} Чтение и базовое редактирование</li>
-            <li>${icon.check} Цифровая версия в PDF</li>
+            <li>${icon.check} Литературная обработка текста ИИ</li>
+            <li>${icon.check} Чтение, базовое редактирование и PDF</li>
           </ul>
           <a class="btn btn--ghost btn--lg btn--block" href="#/free">${answered('free') ? 'Продолжить' : 'Начать бесплатно'}</a>
         </article>
         <article class="plan plan--main">
           ${aura(24, 'aura--plan')}
-          <p class="plan__name">Полная книга моей жизни <span class="tag">единоразово</span></p>
+          <h3 class="plan__name">Полная книга моей жизни <span class="tag">единоразово</span></h3>
           <p class="plan__price"><strong>${PRICE}</strong><span>без подписки</span></p>
           <ul class="checks">
             <li>${icon.check} 10 глав и 94 вопроса</li>
@@ -273,13 +317,22 @@
             <li>${icon.check} Название книги и посвящение</li>
             <li>${icon.check} Красиво оформленный PDF для печати</li>
           </ul>
-          <a class="btn btn--dark btn--lg btn--block" href="${state.paid ? '#/full' : '#/offer'}">${state.paid ? 'Открыть полную книгу' : 'Хочу полную книгу'} ${icon.arrow}</a>
+          <a class="btn btn--dark btn--lg btn--block" href="${server.paid ? '#/full' : '#/offer'}">${server.paid ? 'Открыть полную книгу' : 'Хочу полную книгу'} ${icon.arrow}</a>
         </article>
       </div>
       <p class="pricing__gift">Отличный подарок родителям и близким — их история тоже важна.</p>
     </section>
 
-    <footer class="footer">${logo()}<span>Ответы хранятся только в твоём браузере и никуда не отправляются.</span></footer>`;
+    <section class="section" id="faq">
+      <p class="eyebrow">Частые вопросы</p>
+      <h2>Что важно знать</h2>
+      <div class="faq">
+        ${FAQ.map(([q, a]) => `<details><summary>${esc(q)}</summary><p>${esc(a)}</p></details>`).join('')}
+      </div>
+    </section>
+    </main>
+
+    <footer class="footer">${logo()}<nav class="footer__links"><a href="/privacy.html">Конфиденциальность</a><a href="/terms.html">Оферта</a></nav></footer>`;
 
     const nav = document.getElementById('nav');
     const burger = document.getElementById('burger');
@@ -287,6 +340,16 @@
     burger.addEventListener('click', () => setMenu(!nav.classList.contains('nav--open')));
     nav.querySelectorAll('.nav__links a').forEach((a) => a.addEventListener('click', () => setMenu(false)));
   }
+
+  // Тексты FAQ дублируются в разметке JSON-LD в index.html — меняй в обоих местах.
+  const FAQ = [
+    ['Сколько времени займёт?', 'Бесплатная часть — 12 вопросов, обычно 15–30 минут. Полная книга — 94 вопроса, её удобно проходить за несколько вечеров: прогресс сохраняется.'],
+    ['ИИ не перепишет мою жизнь?', 'Нет. ИИ только связывает твои ответы в текст и правит повторы. Он не добавляет фактов, имён и событий, которых ты не называл. Любой абзац можно отредактировать вручную.'],
+    ['Можно ли пропустить вопрос?', 'Да, любой. Пустые вопросы просто не попадут в книгу. Вернуться к ним можно в любой момент.'],
+    ['Как оплачивается полная книга?', 'Один раз, без подписки. После оплаты открываются все 10 глав, фото, посвящение и полная PDF-книга. Ответы бесплатной части тоже войдут в неё.'],
+    ['Где хранятся мои ответы?', 'На нашем сервере, привязанные к твоему браузеру. Для продолжения на другом устройстве есть личная ссылка. Мы не публикуем и не продаём твои истории.'],
+    ['Можно ли подарить книгу?', 'Да — пройди интервью вместе с родителями или близкими: отвечать можно голосом, а PDF легко распечатать.'],
+  ];
 
   // ---------- Предложение полной версии ----------
 
@@ -311,29 +374,72 @@
           </ul>
           <div class="offer__buy">
             <p class="plan__price"><strong>${PRICE}</strong><span>единоразово</span></p>
-            <p class="offer__note">Без подписки. Твои 12 ответов уже войдут в книгу.</p>
-            <button type="button" class="btn btn--dark btn--lg btn--block" id="buy">Открыть полную версию ${icon.arrow}</button>
-            <div class="offer__test" id="test" hidden>
-              <p><strong>Это тестовая версия сервиса.</strong> Оплата пока не подключена, поэтому деньги не спишутся — мы откроем полную книгу бесплатно. Спасибо, что помогаешь проверить идею!</p>
-              <button type="button" class="btn btn--dark btn--block" id="unlock">Продолжить бесплатно ${icon.arrow}</button>
-            </div>
+            <p class="offer__note">Без подписки. Твои ответы бесплатной части уже войдут в книгу.</p>
+            <button type="button" class="btn btn--dark btn--lg btn--block" id="buy" ${server.paid ? 'disabled' : ''}>${server.paid ? 'Уже оплачено' : `Оплатить ${PRICE}`} ${icon.arrow}</button>
+            <p class="offer__legal">Нажимая «Оплатить», ты принимаешь <a href="/terms.html" target="_blank" rel="noopener">условия оферты</a>.</p>
           </div>
         </div>
       </main>
     </div>`;
 
-    document.getElementById('buy').addEventListener('click', (e) => {
+    document.getElementById('buy').addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
       track('buy_click');
-      save();
-      e.currentTarget.hidden = true;
-      document.getElementById('test').hidden = false;
+      btn.disabled = true;
+      btn.textContent = 'Переходим к оплате…';
+      try {
+        await flush();
+        if (!server.exists) await api('PUT', '/api/state', { data: state }).then(() => { server.exists = true; });
+        const res = await api('POST', '/api/pay');
+        if (res.paid) { server.paid = true; go('#/full'); return; }
+        location.href = res.url;
+      } catch (err) {
+        btn.disabled = false;
+        btn.innerHTML = `Оплатить ${PRICE} ${icon.arrow}`;
+        toast(err.message === 'payments_disabled' ? 'Оплата временно недоступна — попробуй чуть позже.' : 'Не получилось создать платёж. Попробуй ещё раз.');
+      }
     });
-    document.getElementById('unlock').addEventListener('click', () => {
-      state.paid = true;
-      track('unlock');
-      save();
-      go('#/full');
-    });
+  }
+
+  // Возврат с оплаты: спрашиваем сервер, подтвердил ли UrlPay платёж.
+  function renderPaid() {
+    app.innerHTML = `
+    <div class="offer">
+      ${aura(160, 'aura--offer-a')}
+      <header class="offer__bar">${logo()}</header>
+      <main class="offer__card offer__card--center">
+        <div class="spinner" aria-hidden="true"></div>
+        <h1 id="paid-title">Проверяем оплату…</h1>
+        <p class="offer__text" id="paid-text">Обычно это занимает несколько секунд.</p>
+        <div id="paid-actions"></div>
+      </main>
+    </div>`;
+    let tries = 0;
+    const check = async () => {
+      if (location.hash !== '#/paid') return;
+      tries++;
+      try {
+        const res = await api('POST', '/api/pay/check');
+        if (res.paid) {
+          server.paid = true;
+          track('paid');
+          flush();
+          document.querySelector('.spinner').remove();
+          document.getElementById('paid-title').textContent = 'Оплата прошла — спасибо!';
+          document.getElementById('paid-text').textContent = 'Полная книга открыта. Твои 12 ответов уже в ней.';
+          document.getElementById('paid-actions').innerHTML = `<a class="btn btn--dark btn--lg" href="#/full">Продолжить книгу ${icon.arrow}</a>`;
+          return;
+        }
+      } catch (e) { /* повторим */ }
+      if (tries < 40) setTimeout(check, 3000);
+      else {
+        document.querySelector('.spinner').remove();
+        document.getElementById('paid-title').textContent = 'Пока не видим оплату';
+        document.getElementById('paid-text').textContent = 'Если деньги списались, подожди пару минут и обнови страницу — платёж подтвердится автоматически.';
+        document.getElementById('paid-actions').innerHTML = `<a class="btn btn--ghost btn--lg" href="#/offer">Вернуться</a>`;
+      }
+    };
+    check();
   }
 
   // ---------- Интервью ----------
@@ -378,7 +484,7 @@
     const pct = Math.round((done / all) * 100);
     const n = stepIndex(t, ci, qi) + 1;
     const answer = state.answers[q.id] || { text: '' };
-    const photo = state.photos[chapter.id];
+    const photo = server.photos[chapter.id];
     const isLast = n === all;
     const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -407,8 +513,8 @@
             }).join('')}
           </nav>
           ${t === 'free' ? `
-            <a class="side__upsell" href="${state.paid ? '#/full' : '#/offer'}">
-              <strong>Полная книга</strong><span>10 глав · 94 вопроса${state.paid ? '' : ` · ${PRICE}`}</span>
+            <a class="side__upsell" href="${server.paid ? '#/full' : '#/offer'}">
+              <strong>Полная книга</strong><span>10 глав · 94 вопроса${server.paid ? '' : ` · ${PRICE}`}</span>
             </a>` : `
             <a class="side__upsell side__upsell--plain" href="#/free/0/0"><strong>Моя история</strong><span>12 первых вопросов · ${answered('free')}/12</span></a>`}
         </aside>
@@ -426,17 +532,18 @@
 
             ${q.type === 'intro' ? introFields() : ''}
             <div class="answer">
+              <label class="visually-hidden" for="answer">Ответ</label>
               <textarea id="answer" rows="6" placeholder="${q.type === 'intro' ? 'Как ты обычно представляешься? Например: «Я Серёжа, инженер и папа двоих детей»' : 'Начни писать или нажми на микрофон…'}">${esc(answer.text)}</textarea>
               <div class="answer__tools">
                 ${SpeechRec ? `<button type="button" class="mic" id="mic">${icon.mic}<span>Ответить голосом</span></button>` : '<span class="hint">Голосовой ввод работает в Chrome и Safari</span>'}
                 ${t === 'full' ? `<label class="photo-add" title="Фото к главе">${icon.photo}<span>${photo ? 'Заменить фото' : 'Фото к главе'}</span><input type="file" id="photo" accept="image/*" hidden></label>` : ''}
               </div>
             </div>
-            <div class="follow" id="follow" hidden></div>
+            <div class="follow" id="follow" hidden aria-live="polite"></div>
 
             ${t === 'full' && photo ? `
               <figure class="photo-preview"><img src="${photo.src}" alt="">
-                <figcaption><input id="caption" value="${esc(photo.caption)}" placeholder="Подпись к фото"><button type="button" class="link" id="photo-remove">Убрать</button></figcaption>
+                <figcaption><input id="caption" value="${esc(photo.caption)}" placeholder="Подпись к фото" aria-label="Подпись к фото"><button type="button" class="link" id="photo-remove">Убрать</button></figcaption>
               </figure>` : ''}
 
             <div class="card__nav">
@@ -460,21 +567,33 @@
     return `<div class="form">
       <label>Имя для обложки книги<input id="p-name" value="${esc(p.name)}" placeholder="Имя и фамилия" autocomplete="name"></label>
       <fieldset class="seg"><legend>Как обращаться к тебе в вопросах и книге?</legend>
-        <button type="button" data-gender="m" class="${p.gender !== 'f' ? 'is-on' : ''}">Он</button>
-        <button type="button" data-gender="f" class="${p.gender === 'f' ? 'is-on' : ''}">Она</button>
+        <button type="button" data-gender="m" class="${p.gender !== 'f' ? 'is-on' : ''}" aria-pressed="${p.gender !== 'f'}">Он</button>
+        <button type="button" data-gender="f" class="${p.gender === 'f' ? 'is-on' : ''}" aria-pressed="${p.gender === 'f'}">Она</button>
       </fieldset>
     </div>`;
   }
 
-  // Подбираем одно-два уточнения по содержанию ответа: чего в нём не хватает.
-  function pickFollowUps(text, asked) {
+  // Запасные уточнения по правилам — если ИИ недоступен.
+  function ruleFollowUps(text, asked) {
     const len = text.trim().length;
     if (len < 15 || len > 900) return [];
     return FOLLOW_UPS.filter((f) =>
-      !asked.includes(f.id)
+      !asked.includes(f.text)
       && (!f.minLen || len >= f.minLen)
       && (!f.maxLen || len <= f.maxLen)
-      && (!f.missing || !f.missing.test(text))).slice(0, 2);
+      && (!f.missing || !f.missing.test(text))).slice(0, 2).map((f) => g(f.text));
+  }
+
+  // Уточнения от ИИ кешируем по тексту ответа, чтобы не спрашивать повторно.
+  const followCache = new Map();
+
+  async function aiFollowUps(qid, text) {
+    const key = `${qid}:${text.trim()}`;
+    if (followCache.has(key)) return followCache.get(key);
+    await flush();
+    const res = await api('POST', '/api/ai/followup', { questionId: qid, text });
+    followCache.set(key, res.questions);
+    return res.questions;
   }
 
   function bindInterview(t, chapter, q, SpeechRec) {
@@ -492,18 +611,37 @@
       route();
     }));
 
-    // Текст + уточняющие вопросы
+    // Текст + уточняющие вопросы: сначала ИИ, при ошибке — правила.
     const ta = document.getElementById('answer');
     const follow = document.getElementById('follow');
-    const renderFollow = () => {
-      const list = pickFollowUps(ta.value, answer().asked || []);
-      follow.hidden = !list.length;
-      follow.innerHTML = list.length ? `
+    let lastAskedLen = 0;
+    const showFollow = (list, fromAi) => {
+      const asked = answer().asked || [];
+      const items = list.filter((x) => !asked.includes(x)).slice(0, 2);
+      follow.hidden = !items.length;
+      follow.innerHTML = items.length ? `
         <span class="follow__avatar">${icon.spark}</span>
         <div class="follow__body">
-          <p class="follow__label">Уточнение — можно пропустить</p>
-          ${list.map((f) => `<button type="button" class="follow__q" data-follow="${f.id}">${esc(g(f.text))}<span>${icon.pen}</span></button>`).join('')}
+          <p class="follow__label">${fromAi ? 'Уточнение от ИИ' : 'Уточнение'} — можно пропустить</p>
+          ${items.map((text) => `<button type="button" class="follow__q" data-follow="${esc(text)}">${esc(text)}<span>${icon.pen}</span></button>`).join('')}
         </div>` : '';
+    };
+    const renderFollow = async () => {
+      const text = ta.value;
+      const len = text.trim().length;
+      if (len < 20 || len > 3500) { showFollow([], false); return; }
+      const rules = ruleFollowUps(text, answer().asked || []);
+      if (!server.features.ai || Math.abs(len - lastAskedLen) < 25) {
+        if (!server.features.ai) showFollow(rules, false);
+        return;
+      }
+      lastAskedLen = len;
+      try {
+        const list = await aiFollowUps(q.id, text);
+        if (ta.value === text) showFollow(list, true);
+      } catch (e) {
+        showFollow(rules, false);
+      }
     };
     let followTimer;
     follow.addEventListener('click', (e) => {
@@ -515,7 +653,8 @@
       ta.value = ta.value.replace(/\s*$/, '') + '\n\n';
       a.text = ta.value;
       save();
-      renderFollow();
+      b.remove();
+      if (!follow.querySelector('[data-follow]')) follow.hidden = true;
       ta.focus();
       ta.setSelectionRange(ta.value.length, ta.value.length);
       ta.scrollTop = ta.scrollHeight;
@@ -524,9 +663,9 @@
       answer().text = ta.value;
       save();
       clearTimeout(followTimer);
-      followTimer = setTimeout(renderFollow, 700);
+      followTimer = setTimeout(renderFollow, 1800);
     });
-    renderFollow();
+    if (ta.value.trim().length >= 20) renderFollow();
     if (q.type !== 'intro' || state.profile.name) {
       ta.focus({ preventScroll: true });
       ta.setSelectionRange(ta.value.length, ta.value.length);
@@ -568,7 +707,7 @@
           answer().text = ta.value.trim();
           save();
           clearTimeout(followTimer);
-          followTimer = setTimeout(renderFollow, 700);
+          followTimer = setTimeout(renderFollow, 2500);
         };
         recognition.onerror = (e) => {
           if (e.error === 'not-allowed') toast('Разреши доступ к микрофону в настройках браузера.');
@@ -579,25 +718,38 @@
       });
     }
 
-    // Фото главы (полная книга)
+    // Фото главы (полная книга) — хранится на сервере.
     const file = document.getElementById('photo');
     if (file) file.addEventListener('change', async () => {
       const f = file.files[0];
       if (!f) return;
       try {
-        const prev = state.photos[chapter.id];
-        const src = await compressImage(f, 1100, 0.72);
-        state.photos[chapter.id] = { src, caption: prev ? prev.caption : '' };
-        if (!save()) { if (prev) state.photos[chapter.id] = prev; else delete state.photos[chapter.id]; }
+        const prev = server.photos[chapter.id];
+        const src = await compressImage(f, 1400, 0.8);
+        const caption = prev ? prev.caption : '';
+        await flush();
+        await api('PUT', `/api/photo/${chapter.id}`, { src, caption });
+        server.photos[chapter.id] = { src, caption };
         route();
       } catch (e) {
-        toast('Не получилось прочитать изображение.');
+        toast(e.status === 413 ? 'Фото слишком большое.' : 'Не получилось загрузить фото.');
       }
     });
     const cap = document.getElementById('caption');
-    if (cap) cap.addEventListener('input', () => { state.photos[chapter.id].caption = cap.value; save(); });
+    let capTimer;
+    if (cap) cap.addEventListener('input', () => {
+      server.photos[chapter.id].caption = cap.value;
+      clearTimeout(capTimer);
+      capTimer = setTimeout(() => api('PUT', `/api/photo/${chapter.id}`, { src: null, caption: cap.value }).then(flashSaved).catch(() => toast('Не удалось сохранить подпись.')), 700);
+    });
     const rm = document.getElementById('photo-remove');
-    if (rm) rm.addEventListener('click', () => { delete state.photos[chapter.id]; save(); route(); });
+    if (rm) rm.addEventListener('click', async () => {
+      try {
+        await api('DELETE', `/api/photo/${chapter.id}`);
+        delete server.photos[chapter.id];
+        route();
+      } catch (e) { toast('Не удалось убрать фото.'); }
+    });
   }
 
   function compressImage(file, maxSide, quality) {
@@ -621,28 +773,42 @@
 
   // Состав книги: бесплатная — 5 разделов из 12 вопросов;
   // полная — «Знакомство» + 10 глав, куда вливаются и ответы бесплатной части.
-  function bookChapters(s, full) {
+  function bookChapters(s, full, photos = {}) {
     const freeQs = TRACKS.free.flatMap((c) => c.questions);
     const items = (qs) => qs.filter((q) => isAnswered(q, s) && (s.answers[q.id] || {}).text).map((q) => ({ q, a: s.answers[q.id] }));
-    if (!full) return TRACKS.free.map((c) => ({ c, items: items(c.questions) }));
+    if (!full) return TRACKS.free.map((c) => ({ c, key: `free:${c.id}`, items: items(c.questions) }));
     const intro = { id: 'intro', title: 'Знакомство', hue: 24 };
     return [intro, ...TRACKS.full].map((c) => ({
       c,
+      key: `full:${c.id}`,
       items: items([...freeQs.filter((q) => q.into === c.id), ...(c.questions || [])]),
-      photo: s.photos[c.id],
+      photo: photos[c.id],
     }));
   }
+
+  const chapterSig = (x, s) => signature(s.profile.gender + x.items.filter((it) => !it.a.excluded).map((it) => it.a.text).join('\u0001'));
 
   const paragraphs = (text) => String(text || '').split(/\n+/).map((p) => p.trim()).filter(Boolean);
   const defaultTitle = (full) => (full ? 'Книга моей жизни' : 'Моя история');
 
-  function bookMarkup(s, full) {
+  function bookMarkup(s, full, opts = {}) {
+    const aiTexts = opts.ai || {};
+    const literary = s.book.style === 'ai';
     const title = s.book.title.trim() || defaultTitle(full);
     const author = s.profile.name.trim();
     const dedication = full ? s.book.dedication.trim() : '';
-    const chapters = bookChapters(s, full)
-      .map((x) => ({ ...x, items: x.items.filter((it) => !it.a.excluded) }))
+    const chapters = bookChapters(s, full, opts.photos)
+      .map((x) => ({ ...x, all: x.items, items: x.items.filter((it) => !it.a.excluded) }))
       .filter((x) => x.items.length || x.photo);
+
+    const body = (x) => {
+      const ai = literary && aiTexts[x.key];
+      if (ai && ai.text) {
+        const stale = !ai.edited && (s.book.aiSig || {})[x.key] && s.book.aiSig[x.key] !== chapterSig(x, s);
+        return `${stale && opts.screen ? '<p class="bk-stale">Ответы в этой главе изменились — текст можно обновить в редакторе.</p>' : ''}${paragraphs(ai.text).map((p) => `<p>${esc(p)}</p>`).join('')}`;
+      }
+      return x.items.map((it) => `<h3 class="bk-sub">${esc(g(it.q.title, s))}</h3>${paragraphs(it.a.text).map((p) => `<p>${esc(p)}</p>`).join('')}`).join('');
+    };
 
     return {
       chapters,
@@ -667,22 +833,25 @@
         <p class="bk-chapter__num">${full ? `Глава ${i + 1}` : `Часть ${i + 1}`}</p>
         <h2>${esc(g(x.c.title, s))}</h2>
         ${x.photo ? `<figure class="bk-photo"><img src="${x.photo.src}" alt="">${x.photo.caption ? `<figcaption>${esc(x.photo.caption)}</figcaption>` : ''}</figure>` : ''}
-        ${x.items.map((it) => `<h3 class="bk-sub">${esc(g(it.q.title, s))}</h3>${paragraphs(it.a.text).map((p) => `<p>${esc(p)}</p>`).join('')}`).join('')}
+        ${body(x)}
       </section>`).join('')}
       ${chapters.length ? '' : `<section class="bk-empty"><p>Здесь появятся главы твоей книги.</p><a class="btn btn--dark" href="#/interview">Ответить на вопросы ${icon.arrow}</a></section>`}`,
     };
   }
 
   let editing = false;
+  let generating = false;
 
   function renderBook(isExample) {
     stopRecognition();
     const s = isExample ? window.EXAMPLE_STATE : state;
-    const full = !isExample && state.paid;
-    const { chapters, html } = bookMarkup(s, full);
+    const full = !isExample && server.paid;
+    const opts = isExample ? { ai: window.EXAMPLE_AI, photos: {} } : { ai: server.ai, photos: full ? server.photos : {}, screen: true };
+    const { chapters, html } = bookMarkup(s, full, opts);
     const t = full ? 'full' : 'free';
     const done = answered(t, s), all = total(t);
     if (isExample) editing = false;
+    const literary = s.book.style === 'ai';
 
     app.innerHTML = `
     <div class="reader">
@@ -703,7 +872,14 @@
           ${!isExample && !editing && done < all ? `
             <div class="notice">${t === 'free' ? `Ответов: ${done} из ${all}. Пустые вопросы просто не попадут в историю.` : `Ответов: ${done} из ${all}. Продолжай в своём темпе — книга пересобирается сама.`}
               <a href="#/${t}">Продолжить ${icon.arrow}</a></div>` : ''}
+          ${!isExample && !editing && chapters.length ? `
+            <div class="style-switch" role="group" aria-label="Вид текста">
+              <button type="button" data-style="answers" class="${literary ? '' : 'is-on'}" aria-pressed="${!literary}">Мои ответы</button>
+              <button type="button" data-style="ai" class="${literary ? 'is-on' : ''}" aria-pressed="${literary}">${icon.spark} Литературный текст</button>
+              <span class="style-switch__hint" id="gen-status">${literary ? literaryHint(chapters) : 'ИИ соберёт ответы в связный текст твоими словами'}</span>
+            </div>` : ''}
           ${editing ? editorMarkup(full) : `<article class="paper" id="book">${html}</article>`}
+          ${!isExample && !editing && chapters.length ? recoveryMarkup() : ''}
           ${!isExample && !full && !editing && chapters.length ? upsellMarkup() : ''}
           ${isExample ? upsellMarkup(true) : ''}
         </div>
@@ -716,12 +892,91 @@
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }));
 
+    app.querySelectorAll('[data-style]').forEach((b) => b.addEventListener('click', async () => {
+      state.book.style = b.dataset.style;
+      save();
+      if (state.book.style === 'ai') {
+        track('ai_style');
+        const missing = chapters.filter((x) => !server.ai[x.key] || isStale(x));
+        if (missing.length) { renderBook(false); await generateChapters(missing, full); return; }
+      }
+      renderBook(false);
+    }));
+
     const edit = document.getElementById('edit');
     if (edit) edit.addEventListener('click', () => { editing = !editing; if (editing) track('edit_open'); renderBook(false); window.scrollTo(0, 0); });
-    if (editing) bindEditor();
+    if (editing) bindEditor(full);
 
     const pdf = document.getElementById('pdf');
     if (pdf) pdf.addEventListener('click', () => downloadPdf(pdf, full));
+
+    const rec = document.getElementById('recovery');
+    if (rec) rec.addEventListener('click', copyRecoveryLink);
+  }
+
+  function isStale(x) {
+    const ai = server.ai[x.key];
+    if (!ai || ai.edited) return false;
+    return (state.book.aiSig || {})[x.key] !== chapterSig(x, state);
+  }
+
+  function literaryHint(chapters) {
+    if (generating) return 'ИИ пишет главы…';
+    if (!server.features.ai) return 'Литературная обработка временно недоступна';
+    const missing = chapters.filter((x) => !server.ai[x.key]).length;
+    return missing ? `${missing} ${plural(missing, 'глава ждёт', 'главы ждут', 'глав ждут')} обработки` : 'Текст собран из твоих ответов — править можно в редакторе';
+  }
+
+  // Генерируем главы по одной: так видно прогресс и не упираемся в лимиты.
+  async function generateChapters(list, full, force = false) {
+    if (generating || !server.features.ai) {
+      if (!server.features.ai) toast('Литературная обработка временно недоступна.');
+      return;
+    }
+    generating = true;
+    await flush();
+    let done = 0;
+    const status = () => document.getElementById('gen-status');
+    for (const x of list) {
+      if (status()) status().textContent = `ИИ пишет: «${g(x.c.title)}» (${done + 1} из ${list.length})…`;
+      try {
+        const entry = await api('POST', '/api/ai/chapter', { edition: full ? 'full' : 'free', chapterId: x.c.id, force });
+        server.ai[x.key] = entry;
+        state.book.aiSig[x.key] = chapterSig(x, state);
+        done++;
+      } catch (e) {
+        generating = false;
+        save();
+        toast(e.message === 'rate_limited' ? 'На сегодня лимит обработки исчерпан — попробуй завтра.' : e.message === 'ai_busy' ? 'ИИ сейчас занят — попробуй через минуту.' : 'Не получилось обработать главу. Попробуй ещё раз.');
+        if (location.hash === '#/book') renderBook(false);
+        return;
+      }
+    }
+    generating = false;
+    save();
+    if (location.hash === '#/book') renderBook(false);
+  }
+
+  function recoveryMarkup() {
+    return `<div class="notice notice--soft">
+      <span>${icon.link} Продолжить на другом устройстве — по личной ссылке. Не делись ею: по ней открывается твоя книга.</span>
+      <button type="button" class="link link--strong" id="recovery">Скопировать ссылку</button>
+    </div>`;
+  }
+
+  async function copyRecoveryLink() {
+    try {
+      await flush();
+      const { url } = await api('GET', '/api/recovery-link');
+      try {
+        await navigator.clipboard.writeText(url);
+        toast('Ссылка скопирована. Сохрани её в заметках или отправь себе.');
+      } catch (e) {
+        window.prompt('Скопируй ссылку:', url);
+      }
+    } catch (e) {
+      toast('Сначала ответь хотя бы на один вопрос.');
+    }
   }
 
   function upsellMarkup(example) {
@@ -731,14 +986,15 @@
       <h2>Это только начало твоей истории</h2>
       <p>Впереди ещё много глав: люди, которые тебя изменили, решения, о которых ты не жалеешь, ошибки, которым ты ${g('{научился|научилась}')}, и моменты, которые хочется сохранить.</p>
       <div class="upsell__row">
-        <a class="btn btn--dark btn--lg" href="${example ? '#/free' : state.paid ? '#/full' : '#/offer'}">${example ? 'Начать бесплатно' : `Полная книга — ${PRICE}`} ${icon.arrow}</a>
+        <a class="btn btn--dark btn--lg" href="${example ? '#/free' : server.paid ? '#/full' : '#/offer'}">${example ? 'Начать бесплатно' : `Полная книга — ${PRICE}`} ${icon.arrow}</a>
         <span>${example ? '12 вопросов · без регистрации' : 'Единоразово, без подписки. 10 глав · 94 вопроса'}</span>
       </div>
     </section>`;
   }
 
-  // Редактор: название, посвящение, выбор историй и правка текста перед сборкой.
+  // Редактор: название, посвящение, выбор историй, правка ответов и литературного текста.
   function editorMarkup(full) {
+    const literary = state.book.style === 'ai';
     return `<div class="editor">
       <section class="editor__card">
         <h2>Книга</h2>
@@ -750,36 +1006,67 @@
           </label>
         </div>
       </section>
-      ${bookChapters(state, full).filter((x) => x.items.length).map((x) => `
+      ${bookChapters(state, full).filter((x) => x.items.length).map((x) => {
+        const ai = server.ai[x.key];
+        return `
         <section class="editor__card" id="ch-${x.c.id}">
           <h2>${esc(g(x.c.title))}</h2>
+          ${literary ? `
+            <div class="story story--ai">
+              <div class="story__head">
+                <p>${icon.spark} Литературный текст главы</p>
+                <button type="button" class="link link--strong" data-regen="${x.key}">${ai ? 'Пересобрать из ответов' : 'Собрать из ответов'}</button>
+              </div>
+              ${ai ? `<textarea data-ai="${x.key}" rows="6">${esc(ai.text)}</textarea>` : '<p class="editor__empty">Текст ещё не собран.</p>'}
+            </div>` : ''}
           ${x.items.map((it) => `
             <div class="story ${it.a.excluded ? 'is-off' : ''}" data-story="${it.q.id}">
               <div class="story__head">
                 <p>${esc(g(it.q.title))}</p>
                 <label class="switch"><input type="checkbox" data-include="${it.q.id}" ${it.a.excluded ? '' : 'checked'}><span></span>В книге</label>
               </div>
-              <textarea data-text="${it.q.id}" rows="4">${esc(it.a.text)}</textarea>
+              <textarea data-text="${it.q.id}" rows="4" aria-label="Ответ">${esc(it.a.text)}</textarea>
             </div>`).join('')}
-        </section>`).join('')}
-      <p class="editor__hint">Правки сохраняются сразу. Выключенные истории останутся в твоих ответах, но не попадут в книгу.</p>
+        </section>`;
+      }).join('')}
+      <p class="editor__hint">Правки сохраняются сразу. Выключенные истории останутся в твоих ответах, но не попадут в книгу${literary ? ' — после правок пересобери текст главы' : ''}.</p>
     </div>`;
   }
 
-  function bindEditor() {
+  function bindEditor(full) {
     const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('input', () => { fn(el.value); save(); }); };
     bind('b-title', (v) => { state.book.title = v; });
     bind('b-author', (v) => { state.profile.name = v; });
     bind('b-dedication', (v) => { state.book.dedication = v; });
+    const fit = (ta) => { ta.style.height = 'auto'; ta.style.height = `${ta.scrollHeight + 2}px`; };
     app.querySelectorAll('[data-text]').forEach((ta) => {
-      const fit = () => { ta.style.height = 'auto'; ta.style.height = `${ta.scrollHeight + 2}px`; };
-      fit();
-      ta.addEventListener('input', () => { state.answers[ta.dataset.text].text = ta.value; save(); fit(); });
+      fit(ta);
+      ta.addEventListener('input', () => { state.answers[ta.dataset.text].text = ta.value; save(); fit(ta); });
     });
     app.querySelectorAll('[data-include]').forEach((cb) => cb.addEventListener('change', () => {
       state.answers[cb.dataset.include].excluded = !cb.checked;
       cb.closest('.story').classList.toggle('is-off', !cb.checked);
       save();
+    }));
+    const aiTimers = {};
+    app.querySelectorAll('[data-ai]').forEach((ta) => {
+      fit(ta);
+      ta.addEventListener('input', () => {
+        const key = ta.dataset.ai;
+        fit(ta);
+        server.ai[key] = { ...server.ai[key], text: ta.value, edited: true };
+        clearTimeout(aiTimers[key]);
+        aiTimers[key] = setTimeout(() => api('PUT', '/api/ai/chapter', { key, text: ta.value }).then(flashSaved).catch(() => toast('Не удалось сохранить текст главы.')), 700);
+      });
+    });
+    app.querySelectorAll('[data-regen]').forEach((b) => b.addEventListener('click', async () => {
+      const x = bookChapters(state, full).find((c) => c.key === b.dataset.regen);
+      if (!x) return;
+      if (server.ai[x.key] && server.ai[x.key].edited && !confirm('Твои ручные правки этой главы заменятся новым текстом. Продолжить?')) return;
+      b.textContent = 'ИИ пишет…';
+      b.disabled = true;
+      await generateChapters([x], full, true);
+      renderBook(false);
     }));
   }
 
@@ -795,7 +1082,7 @@
     // html2pdf клонирует элемент, поэтому смещение за экран задаём обёртке, а не самому источнику.
     const holder = document.createElement('div');
     holder.className = 'pdf-stage';
-    holder.innerHTML = `<div class="pdf-root">${bookMarkup(state, full).html}</div>`;
+    holder.innerHTML = `<div class="pdf-root">${bookMarkup(state, full, { ai: server.ai, photos: full ? server.photos : {} }).html}</div>`;
     document.body.appendChild(holder);
 
     const base = state.book.title.trim() || defaultTitle(full);
@@ -825,6 +1112,14 @@
     if (location.hash === hash) route(); else location.hash = hash;
   }
 
+  const TITLES = {
+    landing: 'Книга моей жизни — автобиография за один час',
+    offer: 'Полная книга моей жизни — Книга моей жизни',
+    book: 'Моя книга — Книга моей жизни',
+    example: 'Пример книги — Книга моей жизни',
+    interview: 'Интервью — Книга моей жизни',
+  };
+
   function route() {
     const hash = location.hash || '#/';
     const m = hash.match(/^#\/(free|full)(?:\/(\d+)\/(\d+))?$/);
@@ -833,21 +1128,27 @@
     if (hash === '#/interview') return go(`#/${currentTrack()}`);
     if (m) {
       const t = m[1];
-      if (t === 'full' && !state.paid) return go('#/offer');
+      if (t === 'full' && !server.paid) return go('#/offer');
       if (m[2] === undefined) return go(`#/${t}/${resumeStep(t).join('/')}`);
       if (!validStep(t, +m[2], +m[3])) return go(`#/${t}`);
+      document.title = TITLES.interview;
       renderInterview(t, +m[2], +m[3]);
       window.scrollTo(0, 0);
     } else if (hash === '#/offer') {
-      if (!document.querySelector('.offer')) track('offer_view');
+      if (!document.querySelector('.offer__buy')) { track('offer_view'); save(); }
+      document.title = TITLES.offer;
       renderOffer();
       window.scrollTo(0, 0);
+    } else if (hash === '#/paid') {
+      renderPaid();
     } else if (hash === '#/book' || hash === '#/example') {
+      document.title = hash === '#/book' ? TITLES.book : TITLES.example;
       renderBook(hash === '#/example');
       window.scrollTo(0, 0);
     } else if (hash === '#/' || !hash.startsWith('#/')) {
       // Якоря лендинга (#how, #pricing) прокручиваем, не перерисовывая страницу.
-      if (!app.querySelector('.hero')) renderLanding();
+      document.title = TITLES.landing;
+      if (!app.querySelector('.hero') || app.dataset.prerendered) { delete app.dataset.prerendered; renderLanding(); }
       const target = hash.startsWith('#/') ? null : document.querySelector(hash);
       if (target) target.scrollIntoView({ behavior: 'smooth' }); else window.scrollTo(0, 0);
     } else {
@@ -855,6 +1156,15 @@
     }
   }
 
-  window.addEventListener('hashchange', route);
-  route();
+  async function start() {
+    try {
+      await loadState();
+    } catch (e) {
+      toast('Сервер недоступен — ответы не сохранятся, пока связь не вернётся.');
+    }
+    window.addEventListener('hashchange', route);
+    route();
+  }
+
+  start();
 })();

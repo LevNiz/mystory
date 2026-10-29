@@ -1,0 +1,14 @@
+{
+  "name": "Книга моей жизни",
+  "short_name": "Моя книга",
+  "description": "Интервью с самим собой: автобиография за один час",
+  "lang": "ru",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f8f7f4",
+  "theme_color": "#f8f7f4",
+  "icons": [
+    { "src": "/img/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/img/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

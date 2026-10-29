@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /r/
+Disallow: /pay/
+
+Sitemap: https://mystorybook.site/sitemap.xml
