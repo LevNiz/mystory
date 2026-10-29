@@ -9,7 +9,10 @@ ssh "$HOST" 'set -e
   git reset --hard --quiet origin/main
   # На сервере docker-compose 1.29 (как у wgpt_bot); подойдёт и плагин `docker compose`.
   if docker compose version >/dev/null 2>&1; then DC="docker compose"; else DC=docker-compose; fi
-  $DC up -d --build
+  $DC build api
+  # docker-compose 1.29 падает с KeyError ContainerConfig при пересоздании — удаляем контейнер явно (простой ~5 с).
+  $DC rm -s -f api
+  $DC up -d api
   for i in $(seq 1 30); do
     if docker exec mystory_api python -c "import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8000/health\", timeout=2)" 2>/dev/null; then
       echo "mystory: healthy"; docker image prune -f >/dev/null; exit 0
