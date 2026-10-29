@@ -120,8 +120,7 @@ async def guard(request: Request, call_next):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "microphone=(self), camera=(), geolocation=()"
     response.headers["Content-Security-Policy"] = CSP
-    if settings.cookie_secure:
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    # HSTS ставит общий nginx (snippets/ssl-params.conf), чтобы заголовок не дублировался.
 
     if path.startswith("/api/") or path.startswith("/r/"):
         response.headers["Cache-Control"] = "no-store"
