@@ -28,6 +28,8 @@ class Settings:
     urlpay_secret_key: str
     urlpay_shop_id: int
     price_rub: str
+    urlpay_paid_statuses: frozenset[str]
+    urlpay_failed_statuses: frozenset[str]
 
     @property
     def ai_enabled(self) -> bool:
@@ -35,7 +37,8 @@ class Settings:
 
     @property
     def payments_enabled(self) -> bool:
-        return bool(self.urlpay_api_key and self.urlpay_secret_key and self.urlpay_shop_id)
+        # Без кода «оплачено» не берём деньги: подтвердить платёж было бы нечем.
+        return bool(self.urlpay_api_key and self.urlpay_secret_key and self.urlpay_shop_id and self.urlpay_paid_statuses)
 
 
 def load_settings() -> Settings:
@@ -55,4 +58,7 @@ def load_settings() -> Settings:
         urlpay_secret_key=_env("URLPAY_SECRET_KEY"),
         urlpay_shop_id=int(_env("URLPAY_SHOP_ID", "0") or 0),
         price_rub=_env("PRICE_RUB", "1490.00"),
+        # Числовые коды статуса UrlPay (0 — создан). Пока коды не заданы, оплата не подтверждается автоматически.
+        urlpay_paid_statuses=frozenset(x.strip() for x in _env("URLPAY_PAID_STATUSES").split(",") if x.strip()),
+        urlpay_failed_statuses=frozenset(x.strip() for x in _env("URLPAY_FAILED_STATUSES").split(",") if x.strip()),
     )

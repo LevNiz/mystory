@@ -390,7 +390,14 @@ async def check_payment(payment: dict[str, Any]) -> str:
     except Exception as exc:  # noqa: BLE001 — сетевые ошибки провайдера не должны ронять запрос
         log.warning("urlpay_check_failed uuid=%s error=%s", payment["uuid"], exc)
         return "pending"
-    result = verdict(remote, payment["uuid"], int(payment["provider_id"]), payment["amount"])
+    result = verdict(
+        remote,
+        payment["uuid"],
+        int(payment["provider_id"]),
+        payment["amount"],
+        settings.urlpay_paid_statuses,
+        settings.urlpay_failed_statuses,
+    )
     log.info(
         "urlpay_check uuid=%s result=%s status_fields=%s",
         payment["uuid"],

@@ -91,9 +91,21 @@ class UrlPay:
         return payment
 
 
-def verdict(payment: dict[str, Any], uuid: str, payment_id: int, amount: str) -> str:
-    """'paid' | 'failed' | 'pending' | 'mismatch' по данным самого UrlPay."""
-    if str(payment.get("uuid", "")) != uuid or int(payment.get("id") or 0) != payment_id:
+def verdict(
+    payment: dict[str, Any],
+    uuid: str,
+    payment_id: int,
+    amount: str,
+    paid_codes: frozenset[str] = frozenset(),
+    failed_codes: frozenset[str] = frozenset(),
+) -> str:
+    """'paid' | 'failed' | 'pending' | 'mismatch' по данным самого UrlPay.
+
+    Наш uuid UrlPay хранит в `external_id` (в `uuid` — их собственный). Статус в API числовой
+    (0 — создан); какие коды означают оплату/отмену, задаётся в .env (URLPAY_PAID_STATUSES).
+    """
+    our_id = str(payment.get("external_id") or payment.get("uuid") or "")
+    if our_id != uuid or int(payment.get("id") or 0) != payment_id:
         return "mismatch"
     try:
         if Decimal(str(payment.get("amount"))).quantize(Decimal("0.01")) != Decimal(amount).quantize(Decimal("0.01")):
@@ -105,8 +117,8 @@ def verdict(payment: dict[str, Any], uuid: str, payment_id: int, amount: str) ->
         if payment.get(key) not in (None, ""):
             status = str(payment[key]).strip().lower()
             break
-    if status in PAID_STATUSES:
+    if status in paid_codes or (not status.isdigit() and status in PAID_STATUSES):
         return "paid"
-    if status in FAILED_STATUSES:
+    if status in failed_codes or (not status.isdigit() and status in FAILED_STATUSES):
         return "failed"
     return "pending"
