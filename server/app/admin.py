@@ -98,6 +98,15 @@ def build_router(
         await asyncio.to_thread(db.set_setting, "price_rub", price)
         return back("price_saved")
 
+    @router.post(f"{base}/full-free")
+    async def set_full_free(request: Request) -> Response:
+        if not authed(request) or not same_origin(request):
+            return back()
+        form = await request.form()
+        enabled = form.get("enabled") == "1"
+        await asyncio.to_thread(db.set_setting, "full_free", "1" if enabled else "0")
+        return back("free_on" if enabled else "free_off")
+
     @router.post(f"{base}/promo")
     async def add_promo(request: Request) -> Response:
         if not authed(request) or not same_origin(request):
@@ -147,6 +156,7 @@ def collect(db: Any, default_price: str) -> dict[str, Any]:
     return {
         "price": base_price(db, default_price),
         "price_from_env": db.setting("price_rub") is None,
+        "full_free": db.setting("full_free") == "1",
         "promos": db.promos_with_stats(),
         "payments": db.recent_payments(30),
         "totals": db.totals(),
@@ -158,6 +168,8 @@ def collect(db: Any, default_price: str) -> dict[str, Any]:
 MESSAGES = {
     "wrong": ("err", "Неверный пароль"),
     "price_saved": ("ok", "Цена сохранена — уже действует на сайте"),
+    "free_on": ("ok", "Полная книга теперь бесплатна для всех"),
+    "free_off": ("ok", "Бесплатный доступ выключен — полная книга снова платная"),
     "bad_price": ("err", "Цена должна быть числом от 1 ₽"),
     "promo_added": ("ok", "Промокод создан"),
     "promo_saved": ("ok", "Промокод сохранён"),
@@ -185,7 +197,7 @@ th{color:#8a8c93;font-weight:500;border-top:0}
 .code{font-weight:600;font-family:ui-monospace,Menlo,monospace}.muted{color:#8a8c93}
 .link{font-family:ui-monospace,Menlo,monospace;font-size:13px;user-select:all}
 .msg{padding:10px 14px;border-radius:10px;margin-bottom:16px}.ok{background:#e6f6ee;color:#1f6f49}.err{background:#fdecea;color:#a1301d}
-.off{opacity:.5}.tag{padding:2px 8px;border-radius:99px;font-size:12px;background:#f0efea}.tag.paid{background:#e6f6ee;color:#1f6f49}
+.off{opacity:.5}.free-on{border-color:#2f9e6a;background:#f3fbf7}.tag{padding:2px 8px;border-radius:99px;font-size:12px;background:#f0efea}.tag.paid{background:#e6f6ee;color:#1f6f49}
 .login{max-width:360px;margin:15vh auto;display:flex;flex-direction:column;gap:12px}
 @media(max-width:700px){.stats{grid-template-columns:repeat(2,1fr)}}
 """
@@ -261,7 +273,7 @@ def dashboard(base: str, public_url: str, data: dict[str, Any], msg: str) -> str
   <div><b>{totals["paid"]}</b><span>оплат</span></div>
   <div><b>{rub(totals["revenue"])}</b><span>выручка</span></div>
   <div><b>{totals["books"]}</b><span>книг начато</span></div>
-  <div><b>{rub(price)}</b><span>цена полной книги</span></div>
+  <div><b>{'0 ₽' if data['full_free'] else rub(price)}</b><span>{'сейчас бесплатно' if data['full_free'] else 'цена полной книги'}</span></div>
 </div>
 <br>
 <section class="card"><h2>Цена полной книги</h2>
@@ -270,6 +282,15 @@ def dashboard(base: str, public_url: str, data: dict[str, Any], msg: str) -> str
   <button type="submit">Сохранить</button>
   <span class="muted">{"Сейчас берётся из .env (PRICE_RUB)" if data["price_from_env"] else "Задана здесь, перекрывает .env"}</span>
 </form></section>
+
+<section class="card {'free-on' if data['full_free'] else ''}"><h2>Полная книга бесплатно</h2>
+<form class="inline" method="post" action="{base}/full-free">
+  <input type="hidden" name="enabled" value="{'0' if data['full_free'] else '1'}">
+  <span class="tag {'paid' if data['full_free'] else ''}">{'Включено: полная книга открыта всем' if data['full_free'] else 'Выключено: полная книга платная'}</span>
+  <button type="submit" class="{'ghost' if data['full_free'] else ''}">{'Выключить' if data['full_free'] else 'Включить бесплатно'}</button>
+</form>
+<p class="muted">Пока режим включён, оплата не нужна: все главы, фото, посвящение и PDF открыты каждому. Уже оплатившие ничего не теряют.</p>
+</section>
 
 <section class="card"><h2>Промокоды</h2>
 <form class="inline" method="post" action="{base}/promo">

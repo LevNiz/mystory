@@ -22,9 +22,10 @@
   let PRICE = '1 490 ₽';
   let BASE_PRICE = PRICE;
   let PROMO = null; // { code, percent } — если человек пришёл по ссылке с промокодом
+  let FREE_FULL = false; // админка включила полную книгу бесплатно для всех
   const rub = (v) => `${Number(v).toLocaleString('ru-RU')} ₽`;
   // Цена с учётом промокода: зачёркнутая старая + новая.
-  const priceHtml = () => (PROMO ? `<strong>${PRICE}</strong><s>${BASE_PRICE}</s>` : `<strong>${PRICE}</strong>`);
+  const priceHtml = () => (PROMO || FREE_FULL ? `<strong>${PRICE}</strong><s>${BASE_PRICE}</s>` : `<strong>${PRICE}</strong>`);
   const promoNote = () => (PROMO ? `<p class="promo-note">${icon.spark} Промокод ${esc(PROMO.code)}: скидка ${PROMO.percent}% на полную книгу</p>` : '');
 
   async function api(method, url, body) {
@@ -47,8 +48,9 @@
 
   async function loadState() {
     const s = await api('GET', '/api/state');
-    server = { paid: s.paid, exists: s.exists, ai: s.ai || {}, photos: s.photos || {}, features: s.features };
-    PRICE = rub(s.features.price);
+    server = { paid: s.paid, purchased: s.purchased, exists: s.exists, ai: s.ai || {}, photos: s.photos || {}, features: s.features };
+    FREE_FULL = Boolean(s.features.fullFree);
+    PRICE = FREE_FULL ? '0 ₽' : rub(s.features.price);
     BASE_PRICE = rub(s.features.basePrice || s.features.price);
     PROMO = s.features.promo || null;
     const d = s.data || {};
@@ -233,7 +235,7 @@
     <section class="hero">
       ${aura(24, 'aura--hero-a')}${aura(265, 'aura--hero-b')}${aura(165, 'aura--hero-c')}
       <div class="hero__copy">
-        <p class="pill">${icon.spark} ${server.paid ? 'Полная версия открыта' : PROMO ? `Промокод ${esc(PROMO.code)}: −${PROMO.percent}% на полную книгу` : '12 вопросов — бесплатно'}</p>
+        <p class="pill">${icon.spark} ${FREE_FULL && !server.purchased ? 'Сейчас полная книга — бесплатно' : server.paid ? 'Полная версия открыта' : PROMO ? `Промокод ${esc(PROMO.code)}: −${PROMO.percent}% на полную книгу` : '12 вопросов — бесплатно'}</p>
         <h1>Интервью <em>с самим собой</em></h1>
         <p class="hero__sub">Твоя автобиография за один час</p>
         <p class="hero__text">Ответь на несколько вопросов — голосом или текстом — и мы соберём полноценную автобиографию всей твоей жизни.</p>
@@ -321,7 +323,7 @@
         </article>
         <article class="plan plan--main">
           ${aura(24, 'aura--plan')}
-          <h3 class="plan__name">Полная книга моей жизни <span class="tag">${server.paid ? 'уже твоя' : 'единоразово'}</span></h3>
+          <h3 class="plan__name">Полная книга моей жизни <span class="tag">${FREE_FULL && !server.purchased ? 'сейчас бесплатно' : server.paid ? 'уже твоя' : 'единоразово'}</span></h3>
           <p class="plan__price">${priceHtml()}<span>без подписки</span></p>
           ${promoNote()}
           <ul class="checks">
@@ -494,7 +496,8 @@
 
   // Экран полной версии: сразу после оплаты (first) или когда оплативший снова открывает предложение.
   function renderPaidDone(first = true) {
-    if (!state.book.paidSeen) {
+    const giftOnly = FREE_FULL && !server.purchased;
+    if (!state.book.paidSeen && !giftOnly) {
       state.book.paidSeen = true;
       track('paid_seen');
       save();
@@ -508,9 +511,9 @@
       <header class="offer__bar">${logo()}${fullBadge()}</header>
       <main class="offer__card paid">
         <span class="paid__icon" aria-hidden="true">${icon.check}</span>
-        <p class="eyebrow">${first ? 'Оплата прошла' : 'Полная версия'}</p>
-        <h1>${first ? 'Полная книга открыта — спасибо!' : 'Полная книга уже твоя'}</h1>
-        <p class="offer__text">Доступ навсегда, без подписки. Твои ответы бесплатной части уже перенесены в книгу.</p>
+        <p class="eyebrow">${giftOnly ? 'Сейчас бесплатно' : first ? 'Оплата прошла' : 'Полная версия'}</p>
+        <h1>${giftOnly ? 'Полная книга сейчас бесплатна' : first ? 'Полная книга открыта — спасибо!' : 'Полная книга уже твоя'}</h1>
+        <p class="offer__text">${giftOnly ? 'Все главы и возможности открыты без оплаты. Твои ответы бесплатной части уже в книге.' : 'Доступ навсегда, без подписки. Твои ответы бесплатной части уже перенесены в книгу.'}</p>
         <ul class="paid__list">
           <li>${icon.check}<span><strong>${fullSize()}</strong> — от корней и семьи до того, что останется после тебя</span></li>
           <li>${icon.check}<span><strong>Литературный текст</strong> каждой главы и уточняющие вопросы</span></li>
@@ -1245,7 +1248,7 @@
 
     // Оплата могла подтвердиться в фоне (человек ушёл платить в приложение банка) —
     // показываем подтверждение один раз, на какой бы странице он ни вернулся.
-    if (server.paid && !state.book.paidSeen && !['#/checkout', '#/paid', '#/example'].includes(hash)) {
+    if (server.purchased && !state.book.paidSeen && !['#/checkout', '#/paid', '#/example'].includes(hash)) {
       document.title = 'Полная книга открыта — Книга моей жизни';
       renderPaidDone(true);
       window.scrollTo(0, 0);

@@ -164,11 +164,21 @@ def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def full_free() -> bool:
+    """Режим из админки: полная книга открыта всем без оплаты."""
+    return db.setting("full_free") == "1"
+
+
 def current_book(request: Request) -> dict[str, Any] | None:
     token = request.cookies.get(COOKIE)
     if not token or len(token) > 100:
         return None
-    return db.book_by_token(token_hash(token))
+    book = db.book_by_token(token_hash(token))
+    if book is not None:
+        # purchased — реальная оплата; paid — доступ к полной книге (оплата или бесплатный режим).
+        book["purchased"] = book["paid"]
+        book["paid"] = book["paid"] or full_free()
+    return book
 
 
 def set_cookie(response: Response, token: str) -> None:
@@ -207,10 +217,11 @@ async def read_json(request: Request) -> dict[str, Any]:
 
 def public_state(book: dict[str, Any] | None) -> dict[str, Any]:
     if book is None:
-        return {"exists": False, "paid": False, "data": None, "ai": {}, "photos": {}}
+        return {"exists": False, "paid": full_free(), "purchased": False, "data": None, "ai": {}, "photos": {}}
     return {
         "exists": True,
         "paid": book["paid"],
+        "purchased": book["purchased"],
         "data": book["data"],
         "ai": book["ai"],
         "photos": db.photos(book["id"]),
@@ -222,7 +233,7 @@ def price_quote(request: Request) -> dict[str, Any]:
 
 
 def features(request: Request) -> dict[str, Any]:
-    return {"ai": bool(ai), "payments": bool(urlpay), **price_quote(request)}
+    return {"ai": bool(ai), "payments": bool(urlpay), "fullFree": full_free(), **price_quote(request)}
 
 
 # ---------- Книга ----------

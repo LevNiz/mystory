@@ -779,3 +779,7 @@ kbd { font: 12px var(--sans); padding: 1px 6px; border-radius: 6px; border: 1px 
   .reader__label .badge-full { padding: 0 6px; margin-right: 6px; }
   .paid__actions .btn { width: 100%; }
 }
+
+/* Первый экран: мятное пятно слева тише, больше воздуха перед блоком статистики */
+.aura--hero-c { opacity: .3; bottom: -220px; }
+.stats { margin-top: clamp(24px, 4vw, 56px); }
