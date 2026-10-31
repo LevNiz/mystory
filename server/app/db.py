@@ -105,7 +105,7 @@ class Database:
                 ("payments", "email TEXT"), ("payments", "pay_url TEXT"), ("payments", "qr_link TEXT"),
                 ("payments", "promo TEXT"), ("payments", "base_amount TEXT"),
                 ("books", "visitor TEXT"), ("books", "source TEXT"), ("books", "last_seen INTEGER"),
-                ("books", "last_ip TEXT"), ("books", "last_ua TEXT"),
+                ("books", "last_ip TEXT"), ("books", "last_ua TEXT"), ("books", "email TEXT"),
             ):
                 try:
                     self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
@@ -407,6 +407,39 @@ class Database:
             "payments": [dict(p) for p in pays],
             "photos": {r["chapter_id"]: r["n"] for r in photos},
         }
+
+    # --- Бэкап и сводки ---
+
+    def snapshot(self) -> bytes:
+        """Согласованная копия базы через SQLite backup API — можно делать на работающем сервере."""
+        dest = sqlite3.connect(":memory:")
+        with self._lock:
+            self._conn.backup(dest)
+        data = dest.serialize()
+        dest.close()
+        return bytes(data)
+
+    def paid_since(self, since: int) -> dict[str, Any]:
+        row = self._q(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(CAST(amount AS REAL)), 0) AS s FROM payments WHERE status = 'paid' AND updated_at >= ?",
+            (since,),
+        )[0]
+        return {"n": row["n"], "sum": row["s"]}
+
+    def set_book_email(self, book_id: str, email: str) -> None:
+        self._q("UPDATE books SET email = ? WHERE id = ?", (email, book_id))
+
+    def find_books(self, query: str) -> list[dict[str, Any]]:
+        """Поиск для поддержки: по e-mail, номеру платежа UrlPay или началу id книги."""
+        q = query.strip().lower()
+        rows = self._q(
+            """SELECT DISTINCT b.id, b.email, b.paid, b.created_at, b.last_seen FROM books b
+               LEFT JOIN payments p ON p.book_id = b.id
+               WHERE lower(b.email) = ? OR lower(p.email) = ? OR CAST(p.provider_id AS TEXT) = ? OR b.id LIKE ?
+               ORDER BY b.paid DESC, b.created_at DESC LIMIT 20""",
+            (q, q, q, f"{q}%" if len(q) >= 6 else "\x00"),
+        )
+        return [dict(r) for r in rows]
 
     # --- Лимиты ---
 

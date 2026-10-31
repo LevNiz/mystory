@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import shutil
 import json
 import logging
 import re
@@ -31,6 +32,7 @@ from .ai import AIBusy, AIClient, AIError
 from .config import load_settings
 from .content import Content, gendered
 from .db import Database
+from .telegram import Telegram, backup_bytes, esc as tg_esc, status_text
 from .pricing import PROMO_COOKIE, normalize_code, quote
 from .urlpay import UrlPay, verdict
 
@@ -47,6 +49,17 @@ urlpay = (
     else None
 )
 ai: AIClient | None = None
+tg = Telegram(settings.tg_bot_token, db, settings.tg_admin_chats, settings.tg_link_code)
+_background: set[asyncio.Task] = set()
+
+
+def alert(text: str, key: str | None = None, every: int = 1800) -> None:
+    """Уведомление в Telegram без ожидания: сбой отправки не должен мешать запросу."""
+    if not tg.enabled:
+        return
+    task = asyncio.get_running_loop().create_task(tg.send(text, key, every))
+    _background.add(task)
+    task.add_done_callback(_background.discard)
 
 # Префикс __Host- (только по HTTPS): cookie нельзя подложить с поддомена или задать для другого пути.
 COOKIE = "__Host-ms_book" if settings.cookie_secure else "ms_book"
@@ -94,6 +107,48 @@ async def payment_watcher() -> None:
             log.exception("payment_watcher_failed")
 
 
+MSK_OFFSET = 3 * 3600
+DISK_ALERT_PERCENT = 85
+
+
+async def run_backup() -> None:
+    data = await asyncio.to_thread(backup_bytes, db)
+    day = time.strftime("%Y-%m-%d", time.gmtime(time.time() + MSK_OFFSET))
+    name = f"mystory-{day}.db.gz"
+    # Локальная копия на 7 дней — на случай, если Telegram недоступен.
+    folder = settings.db_path.parent / "backups"
+    folder.mkdir(exist_ok=True)
+    (folder / name).write_bytes(data)
+    for old in sorted(folder.glob("mystory-*.db.gz"))[:-7]:
+        old.unlink()
+    totals = await asyncio.to_thread(db.totals)
+    caption = f"🗄 <b>Бэкап базы</b> {day}\n{len(data) / 1e6:.1f} МБ · книг {totals['books']} · оплат {totals['paid']}"
+    if not await tg.send_file(name, data, caption):
+        alert(f"⚠️ Бэкап {day} ({len(data) / 1e6:.1f} МБ) сохранён только на сервере: в Telegram не отправился (лимит 50 МБ или ошибка).", "backup_failed", 3600)
+
+
+async def monitor() -> None:
+    """Раз в 5 минут: место на диске; раз в сутки: бэкап (03:00 МСК) и сводка (09:00 МСК)."""
+    while True:
+        try:
+            usage = shutil.disk_usage(settings.db_path.parent)
+            percent = usage.used / usage.total * 100
+            if percent >= DISK_ALERT_PERCENT:
+                alert(f"💾 Диск сервера заполнен на {percent:.0f}% (свободно {usage.free / 1e9:.1f} ГБ).", "disk", 6 * 3600)
+            msk = time.gmtime(time.time() + MSK_OFFSET)
+            today = time.strftime("%Y-%m-%d", msk)
+            if msk.tm_hour >= 3 and await asyncio.to_thread(db.setting, "last_backup_day") != today:
+                await asyncio.to_thread(db.set_setting, "last_backup_day", today)
+                await run_backup()
+            if msk.tm_hour >= 9 and await asyncio.to_thread(db.setting, "last_summary_day") != today:
+                await asyncio.to_thread(db.set_setting, "last_summary_day", today)
+                await tg.send(await asyncio.to_thread(status_text, db))
+        except Exception as exc:  # noqa: BLE001
+            log.exception("monitor_failed")
+            alert(f"⚠️ Ошибка мониторинга: {tg_esc(exc)}", "monitor", 3600)
+        await asyncio.sleep(300)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global ai
@@ -107,12 +162,14 @@ async def lifespan(_: FastAPI):
             settings.ai_max_concurrent,
         )
     log.info("start ai=%s payments=%s", bool(ai), bool(urlpay))
-    watcher = asyncio.create_task(payment_watcher()) if urlpay else None
+    tasks = [asyncio.create_task(t) for t in (payment_watcher() if urlpay else None, monitor(), tg.poll_link()) if t]
+    alert("🟢 Сервер «Книги моей жизни» запущен", "startup", 600)
     yield
-    if watcher:
-        watcher.cancel()
+    for task in tasks:
+        task.cancel()
     if ai:
         await ai.close()
+    await tg.close()
 
 
 app = FastAPI(title="mystory", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -158,7 +215,12 @@ async def guard(request: Request, call_next):
         if length is not None and (not length.isdigit() or int(length) > limit):
             return JSONResponse({"error": "too_large"}, status_code=413)
 
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception as exc:  # noqa: BLE001 — любая непойманная ошибка: в лог, в Telegram, пользователю 500
+        log.exception("unhandled path=%s", path)
+        alert(f"🔴 Ошибка 500: <code>{tg_esc(request.method)} {tg_esc(path)}</code>\n{tg_esc(type(exc).__name__)}: {tg_esc(str(exc)[:300])}", f"500:{path}:{type(exc).__name__}", 900)
+        response = JSONResponse({"error": "server_error"}, status_code=500)
 
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
@@ -553,8 +615,10 @@ async def ai_chapter(request: Request) -> dict[str, Any]:
     try:
         text = await ai.chapter(title, pairs, gender, portrait, captions)  # type: ignore[union-attr]
     except AIBusy:
+        alert("🟡 ИИ занят: все слоты глав заняты, пользователи видят «попробуй через минуту».", "ai_busy", 1800)
         raise HTTPException(status_code=503, detail="ai_busy") from None
-    except AIError:
+    except AIError as exc:
+        alert(f"🔴 ИИ не собрал главу: {tg_esc(exc)}. Проверь apibost и модель {tg_esc(settings.ai_chapter_model)}.", "ai_failed", 900)
         raise HTTPException(status_code=502, detail="ai_failed") from None
     if not text:
         raise HTTPException(status_code=502, detail="ai_empty")
@@ -604,7 +668,8 @@ async def ai_followup(request: Request) -> dict[str, list[str]]:
         questions = await ai.followups(gendered(question.title, gender), answer, gender)  # type: ignore[union-attr]
     except AIBusy:
         raise HTTPException(status_code=503, detail="ai_busy") from None
-    except AIError:
+    except AIError as exc:
+        alert(f"🟠 ИИ не выдал уточняющие вопросы: {tg_esc(exc)}", "ai_followup_failed", 1800)
         raise HTTPException(status_code=502, detail="ai_failed") from None
     track("ai_followup", request, book)
     return {"questions": questions}
@@ -621,6 +686,7 @@ async def check_payment(payment: dict[str, Any]) -> str:
         remote = await urlpay.get(int(payment["provider_id"]))
     except Exception as exc:  # noqa: BLE001 — сетевые ошибки провайдера не должны ронять запрос
         log.warning("urlpay_check_failed uuid=%s error=%s", payment["uuid"], exc)
+        alert(f"🟠 Не удаётся проверить статус платежа в UrlPay: {tg_esc(exc)}", "urlpay_check", 1800)
         return "pending"
     result = verdict(
         remote,
@@ -642,7 +708,12 @@ async def check_payment(payment: dict[str, Any]) -> str:
         if result == "paid":
             await asyncio.to_thread(db.set_payment_status, payment["uuid"], "paid")
             await asyncio.to_thread(db.mark_paid, payment["book_id"])
+            # Книга привязывается к e-mail покупателя — по нему поддержка восстановит доступ.
+            if payment.get("email"):
+                await asyncio.to_thread(db.set_book_email, payment["book_id"], payment["email"])
             await asyncio.to_thread(track, "paid", None, book, meta)
+            promo = f" · промокод {tg_esc(payment['promo'])}" if payment.get("promo") else ""
+            alert(f"💰 <b>Оплата {float(payment['amount']):.0f} ₽</b>{promo}\nкнига {payment['book_id'][:8]} · UrlPay № {payment['provider_id']}")
         else:
             await asyncio.to_thread(db.set_payment_status, payment["uuid"], result)
             await asyncio.to_thread(track, "payment_failed", None, book, {**meta, "status": result})
@@ -700,6 +771,7 @@ async def pay(request: Request) -> dict[str, Any]:
         )
     except Exception as exc:  # noqa: BLE001
         log.error("urlpay_create_error book=%s error=%s", book["id"], exc)
+        alert(f"🔴 Не создаётся платёж в UrlPay: {tg_esc(exc)}", "urlpay_create", 900)
         raise HTTPException(status_code=502, detail="payment_failed") from None
     sbp = await urlpay.sbp_link(created.url)
     await asyncio.to_thread(
@@ -793,6 +865,7 @@ if settings.admin_path and len(settings.admin_password) >= 12:
             secure=settings.cookie_secure,
             rate=rate,
             allow_ips=settings.admin_allow_ips,
+            notify=alert,
         )
     )
 

@@ -227,6 +227,7 @@
 
   const freeDone = () => answered('free') === total('free');
   const MAX_PHOTOS = 6;
+  const SUPPORT_EMAIL = '2091levas@gmail.com';
 
   // Сколько глав и вопросов в полной книге — считаем из данных, чтобы тексты не расходились с вопросами.
   const FULL_CHAPTERS = TRACKS.full.length;
@@ -374,7 +375,7 @@
     </section>
     </main>
 
-    <footer class="footer">${logo()}<nav class="footer__links"><a href="/privacy.html">Конфиденциальность</a><a href="/terms.html">Оферта</a></nav></footer>`;
+    <footer class="footer">${logo()}<nav class="footer__links"><a href="mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Восстановить доступ к книге')}">Потеряли доступ к книге?</a><a href="/privacy.html">Конфиденциальность</a><a href="/terms.html">Оферта</a></nav></footer>`;
 
     const nav = document.getElementById('nav');
     const burger = document.getElementById('burger');
@@ -419,9 +420,10 @@
             <p class="plan__price">${priceHtml()}<span>единоразово</span></p>
             ${promoNote()}
             <p class="offer__note">Без подписки. Твои ответы бесплатной части уже войдут в книгу.</p>
-            <label class="offer__email">E-mail для чека
-              <input type="email" id="buy-email" name="email" autocomplete="email" inputmode="email" required placeholder="you@example.ru" value="${esc(state.profile.email || '')}">
+            <label class="offer__email">E-mail <span class="req">обязательно</span>
+              <input type="email" id="buy-email" name="email" autocomplete="email" inputmode="email" required placeholder="you@example.ru" value="${esc(state.profile.email || '')}" aria-describedby="buy-email-hint">
             </label>
+            <p class="offer__hint" id="buy-email-hint">Сюда придёт чек, и к этому адресу привяжем книгу — если потеряешь доступ, восстановим по нему.</p>
             <p class="offer__error" id="buy-error" role="alert" hidden></p>
             <button type="submit" class="btn btn--dark btn--lg btn--block" id="buy" ${server.paid ? 'disabled' : ''}>${server.paid ? 'Уже оплачено' : `Оплатить ${PRICE}`} ${icon.arrow}</button>
             <p class="offer__legal">Нажимая «Оплатить», ты принимаешь <a href="/terms.html" target="_blank" rel="noopener">условия оферты</a> и <a href="/privacy.html" target="_blank" rel="noopener">политику конфиденциальности</a>. Чек придёт на указанный e-mail.</p>
@@ -439,7 +441,7 @@
       e.preventDefault();
       const btn = document.getElementById('buy');
       const email = emailInput.value.trim();
-      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { showError('Проверь e-mail — на него придёт чек.'); emailInput.focus(); return; }
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]{2,}$/.test(email)) { showError(email ? 'Проверь e-mail: похоже, в адресе опечатка.' : 'Укажи e-mail — без него не сможем восстановить доступ к книге.'); emailInput.focus(); return; }
       track('buy_click');
       state.profile.email = email;
       btn.disabled = true;
@@ -554,6 +556,7 @@
           <button type="button" class="btn btn--dark btn--lg" data-go="#/full">${started ? `Продолжить интервью · ${esc(g(TRACKS.full[ci].title))}` : 'Начать полное интервью'} ${icon.arrow}</button>
           <button type="button" class="btn btn--ghost btn--lg" data-go="#/book">${icon.book} Открыть книгу</button>`}
         </div>
+        ${server.purchased && state.profile.email ? `<p class="paid__mail">${icon.check} Книга привязана к <strong>${esc(state.profile.email)}</strong>. Если потеряешь доступ — напиши на <a href="mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Восстановить доступ к книге')}">${SUPPORT_EMAIL}</a> с этого адреса.</p>` : ''}
         <p class="paid__note">${done === all ? 'Все вопросы отвечены — книгу можно собрать в PDF.' : started ? `Отвечено ${done} из ${all} — продолжай в своём темпе, прогресс сохраняется.` : 'Отвечай в своём темпе — любой вопрос можно пропустить и вернуться позже.'}</p>
       </main>
     </div>`;

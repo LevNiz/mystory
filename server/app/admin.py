@@ -39,6 +39,7 @@ def build_router(
     secure: bool,
     rate: Callable[..., None],
     allow_ips: frozenset[str] = frozenset(),
+    notify: Callable[..., None] | None = None,
 ) -> APIRouter:
     base = "/" + path.strip("/")
     secret = hashlib.sha256(f"mystory-admin:{password}:{path}".encode()).digest()
@@ -92,6 +93,28 @@ def build_router(
         data = await asyncio.to_thread(collect_stats, db, period)
         return HTMLResponse(stats_page(base, data, days if days in {"1", "7", "30", "all"} else "30"), headers=NO_INDEX)
 
+    @router.get(f"{base}/find")
+    async def find(request: Request) -> Response:
+        if not authed(request):
+            return back()
+        query = request.query_params.get("q", "")[:120]
+        results = await asyncio.to_thread(db.find_books, query) if query.strip() else []
+        return HTMLResponse(find_page(base, query, results), headers=NO_INDEX)
+
+    @router.post(f"{base}/book/{{book_id}}/link")
+    async def issue_link(book_id: str, request: Request) -> Response:
+        """Новая личная ссылка для клиента, который потерял доступ (старая перестаёт работать)."""
+        if not authed(request) or not same_origin(request):
+            return back()
+        if await asyncio.to_thread(db.book_by_id, book_id[:40]) is None:
+            raise HTTPException(status_code=404)
+        token = secrets.token_urlsafe(32)
+        await asyncio.to_thread(db.set_token, book_id[:40], hashlib.sha256(token.encode()).hexdigest())
+        await asyncio.to_thread(audit, request, "admin_issue_link", {"book": book_id[:8]})
+        await asyncio.to_thread(db.add_event, "link_rotated", None, book_id[:40], {"by": "admin"})
+        data = await asyncio.to_thread(db.book_timeline, book_id[:40])
+        return HTMLResponse(book_page(base, data, issued=f"{public_url}/r/{token}"), headers=NO_INDEX)
+
     @router.get(f"{base}/book/{{book_id}}")
     async def book_detail(book_id: str, request: Request) -> Response:
         if not authed(request):
@@ -109,6 +132,8 @@ def build_router(
         form = await request.form()
         if not hmac.compare_digest(str(form.get("password", "")).encode(), password.encode()):
             await asyncio.to_thread(audit, request, "admin_login_failed", {})
+            if notify:
+                notify(f"🔐 Неверный пароль в админке с IP {esc(ip(request))}", "admin_failed", 600)
             await asyncio.sleep(1)
             return back("wrong")
         await asyncio.to_thread(audit, request, "admin_login", {})
@@ -395,7 +420,7 @@ def promo_row(base: str, public_url: str, p: dict[str, Any], price: str) -> str:
 # ---------- Аналитика пути пользователя ----------
 
 def admin_nav(base: str, active: str) -> str:
-    tabs = [("settings", base, "Цена и промокоды"), ("stats", f"{base}/stats", "Аналитика и пользователи")]
+    tabs = [("settings", base, "Цена и промокоды"), ("stats", f"{base}/stats", "Аналитика и пользователи"), ("find", f"{base}/find", "Найти клиента")]
     links = "".join(f'<a class="tab {"on" if key == active else ""}" href="{href}">{label}</a>' for key, href, label in tabs)
     return f"""<header><h1>Книга моей жизни · админка</h1>
 <nav class="tabs">{links}</nav>
@@ -421,7 +446,7 @@ def label(name: str) -> str:
 
     if name.startswith("admin_"):
         return {"admin_price": "Админ: цена", "admin_full_free": "Админ: бесплатный режим", "admin_promo_add": "Админ: промокод", "admin_promo_delete": "Админ: удалён промокод",
-                "admin_login": "Админ: вход", "admin_login_failed": "Админ: неверный пароль"}.get(name, name)
+                "admin_login": "Админ: вход", "admin_issue_link": "Админ: выдал новую ссылку", "admin_login_failed": "Админ: неверный пароль"}.get(name, name)
     return LABELS.get(name, name)
 
 
@@ -499,7 +524,30 @@ def stats_page(base: str, data: dict[str, Any], days: str) -> str:
     )
 
 
-def book_page(base: str, data: dict[str, Any]) -> str:
+def find_page(base: str, query: str, results: list[dict[str, Any]]) -> str:
+    rows = "".join(
+        f"<tr><td><a href='{base}/book/{esc(r['id'])}'>{esc(r['id'][:8])}</a></td><td>{esc(r.get('email') or '—')}</td>"
+        f"<td>{'<span class=\'tag paid\'>оплачена</span>' if r['paid'] else '—'}</td><td>{when(r['created_at'])}</td>"
+        f"<td class='muted'>{when(r['last_seen']) if r.get('last_seen') else '—'}</td></tr>"
+        for r in results
+    )
+    body = (
+        f"<table><thead><tr><th>Книга</th><th>E-mail</th><th>Оплата</th><th>Создана</th><th>Был</th></tr></thead><tbody>{rows}</tbody></table>"
+        if results
+        else ("<p class='muted'>Ничего не нашлось.</p>" if query else "")
+    )
+    return shell(
+        "Поиск — Книга моей жизни",
+        f"""<div class="wrap">{admin_nav(base, "find")}
+<section class="card"><h2>Найти книгу клиента</h2>
+<form class="inline" method="get" action="{base}/find">
+  <input type="text" name="q" value="{esc(query)}" placeholder="e-mail, номер платежа UrlPay или начало номера книги" style="min-width:340px" required>
+  <button type="submit">Найти</button></form><br>{body}
+<p class="muted">E-mail привязывается к книге после оплаты. Чтобы вернуть доступ, открой книгу и выдай новую ссылку.</p></section></div>""",
+    )
+
+
+def book_page(base: str, data: dict[str, Any], issued: str | None = None) -> str:
     import json as _json
 
     b = data["book"]
@@ -530,16 +578,25 @@ def book_page(base: str, data: dict[str, Any]) -> str:
   <div><b>{ai_count}</b><span>глав с литературным текстом</span></div>
   <div><b>{photos}</b><span>фото</span></div>
 </div><br>
+{f"""<section class="card free-on"><h2>Новая ссылка для клиента</h2>
+<p><span class="link">{esc(issued)}</span></p>
+<p class="muted">Отправь её клиенту на привязанный e-mail. Старая ссылка и вход в прежнем браузере больше не работают. Ссылка показывается один раз.</p></section>""" if issued else ""}
 <section class="card"><h2>Книга {esc(b['id'][:8])}</h2>
 <table><tbody>
 <tr><td class="muted">Создана</td><td>{when(b['created_at'])}</td></tr>
 <tr><td class="muted">Последняя активность</td><td>{when(b['last_seen']) if b.get('last_seen') else '—'}</td></tr>
 <tr><td class="muted">Источник</td><td>{esc(b.get('source') or '—')}</td></tr>
 <tr><td class="muted">Оплата</td><td>{'оплачена' if b['paid'] else 'нет'}</td></tr>
+<tr><td class="muted">E-mail (привязан при оплате)</td><td>{esc(b.get('email') or '—')}</td></tr>
 <tr><td class="muted">Пол в книге</td><td>{'она' if profile.get('gender') == 'f' else 'он'}</td></tr>
 <tr><td class="muted">Последний IP (без последнего октета)</td><td>{esc(b.get('last_ip') or '—')}</td></tr>
 <tr><td class="muted">Браузер</td><td class="small">{esc(b.get('last_ua') or '—')}</td></tr>
 </tbody></table></section>
+<section class="card"><h2>Доступ</h2>
+<form class="inline" method="post" action="{base}/book/{esc(b['id'])}/link">
+  <button type="submit">Выдать новую ссылку для клиента</button>
+  <span class="muted">Нужна, если клиент потерял доступ. Прежняя ссылка перестанет работать.</span>
+</form></section>
 <section class="card"><h2>Платежи</h2><table><thead><tr><th>Когда</th><th>Сумма</th><th>Промокод</th><th>Статус</th><th>UrlPay</th></tr></thead><tbody>{pays}</tbody></table></section>
 <section class="card"><h2>Путь пользователя</h2><table><thead><tr><th>Когда (МСК)</th><th>Действие</th><th>Детали</th></tr></thead><tbody>{timeline}</tbody></table></section>
 </div>""",

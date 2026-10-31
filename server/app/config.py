@@ -40,6 +40,10 @@ class Settings:
     admin_password: str
     admin_allow_ips: frozenset[str]
 
+    tg_bot_token: str
+    tg_admin_chats: frozenset[str]
+    tg_link_code: str
+
     @property
     def ai_enabled(self) -> bool:
         return bool(self.ai_base_url and self.ai_api_key)
@@ -78,4 +82,8 @@ def load_settings() -> Settings:
         admin_password=_env("ADMIN_PASSWORD"),
         # Необязательный список IP, с которых пускать в админку (через запятую). Пусто — откуда угодно.
         admin_allow_ips=frozenset(x.strip() for x in _env("ADMIN_ALLOW_IPS").split(",") if x.strip()),
+        # Алерты и бэкапы в Telegram. Чат подключается ссылкой https://t.me/<бот>?start=<TG_LINK_CODE>.
+        tg_bot_token=_env("TG_BOT_TOKEN"),
+        tg_admin_chats=frozenset(x.strip() for x in _env("TG_ADMIN_CHAT_IDS").split(",") if x.strip()),
+        tg_link_code=_env("TG_LINK_CODE"),
     )

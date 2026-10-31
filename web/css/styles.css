@@ -806,3 +806,10 @@ kbd { font: 12px var(--sans); padding: 1px 6px; border-radius: 6px; border: 1px 
 /* Личная ссылка: действия и страница подтверждения */
 .notice__actions { display: inline-flex; gap: 16px; flex-wrap: wrap; }
 .lost .warn { margin: -12px auto 24px !important; max-width: 460px; padding: 12px 14px; border-radius: var(--r-sm); background: var(--accent-soft); color: #9a3b1c !important; font-size: 15px !important; }
+
+/* E-mail при оплате и привязка книги */
+.offer__email .req { margin-left: 6px; padding: 2px 8px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 600; }
+.offer__hint { margin: -6px 0 14px; font-size: 13px; color: var(--muted); }
+.paid__mail { display: flex; gap: 10px; align-items: flex-start; margin-top: 18px; padding: 12px 14px; border-radius: var(--r-sm); background: #f3fbf7; font-size: 14px; color: var(--ink-2); }
+.paid__mail svg { flex: none; width: 20px; height: 20px; padding: 4px; border-radius: 50%; background: #2f9e6a; color: #fff; }
+.paid__mail a { color: var(--ink); text-decoration: underline; }
