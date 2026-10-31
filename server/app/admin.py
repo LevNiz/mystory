@@ -175,6 +175,17 @@ def build_router(
         )
         return back("promo_saved")
 
+    @router.post(f"{base}/promo/{{code}}/delete")
+    async def delete_promo(code: str, request: Request) -> Response:
+        if not authed(request) or not same_origin(request):
+            return back()
+        normalized = normalize_code(code)
+        if normalized is None:
+            return back("bad_promo")
+        await asyncio.to_thread(db.delete_promo, normalized)
+        await asyncio.to_thread(audit, request, "admin_promo_delete", {"code": normalized})
+        return back("promo_deleted")
+
     return router
 
 
@@ -214,6 +225,7 @@ MESSAGES = {
     "bad_price": ("err", "Цена должна быть числом от 1 ₽"),
     "promo_added": ("ok", "Промокод создан"),
     "promo_saved": ("ok", "Промокод сохранён"),
+    "promo_deleted": ("ok", "Промокод удалён — ссылка больше не даёт скидку, история оплат сохранена"),
     "promo_exists": ("err", "Такой промокод уже есть"),
     "bad_promo": ("err", "Код — латиница, цифры, «-» и «_», 2–32 символа; скидка — от 1 до 99 %"),
 }
@@ -246,6 +258,9 @@ th{color:#8a8c93;font-weight:500;border-top:0}
 .bar{height:10px;border-radius:99px;background:#eeece7;overflow:hidden}.bar span{display:block;height:100%;background:linear-gradient(90deg,#f0623a,#f5a35c)}
 .num{text-align:right;font-variant-numeric:tabular-nums}.small{font-size:12px;white-space:normal}
 a{color:#16171b}
+.del summary{cursor:pointer;color:#a1301d;font-size:13px;list-style:none}.del summary::-webkit-details-marker{display:none}
+.del form{display:flex;gap:8px;align-items:center;margin-top:6px;white-space:nowrap}
+button.danger{background:#c43d26}
 @media(max-width:700px){.stats{grid-template-columns:repeat(2,1fr)}}
 """
 
@@ -301,7 +316,7 @@ def dashboard(base: str, public_url: str, data: dict[str, Any], msg: str) -> str
     totals = data["totals"]
     price = data["price"]
     promo_rows = "".join(promo_row(base, public_url, p, price) for p in data["promos"]) or (
-        '<tr><td colspan="9" class="muted">Промокодов пока нет</td></tr>'
+        '<tr><td colspan="10" class="muted">Промокодов пока нет</td></tr>'
     )
     payment_rows = "".join(
         f"""<tr><td>{when(p["created_at"])}</td><td>{rub(p["amount"])}</td>
@@ -345,7 +360,7 @@ def dashboard(base: str, public_url: str, data: dict[str, Any], msg: str) -> str
   <input type="text" name="note" placeholder="Заметка: канал, блогер…" maxlength="120">
   <button type="submit">Создать</button>
 </form><br>
-<table><thead><tr><th>Код</th><th>Скидка</th><th>Цена</th><th>Ссылка</th><th>Переходы</th><th>Уник.</th><th>Счета</th><th>Оплаты</th><th>Выручка</th></tr></thead>
+<table><thead><tr><th>Код</th><th>Скидка</th><th>Цена</th><th>Ссылка</th><th>Переходы</th><th>Уник.</th><th>Счета</th><th>Оплаты</th><th>Выручка</th><th></th></tr></thead>
 <tbody>{promo_rows}</tbody></table>
 <p class="muted">Переходы — открытия ссылки, уникальные — по браузерам. Счета — сколько раз нажали «Оплатить» с этим кодом.</p>
 </section>
@@ -371,7 +386,10 @@ def promo_row(base: str, public_url: str, p: dict[str, Any], price: str) -> str:
 <td>{rub(discounted(price, int(p['percent'])))}</td>
 <td><span class="link">{esc(link)}</span></td>
 <td>{p['visits']}</td><td>{p['uniques']}</td><td>{p['checkouts']}</td>
-<td><b>{p['paid']}</b> <span class="muted">({conversion})</span></td><td>{rub(p['revenue'])}</td></tr>"""
+<td><b>{p['paid']}</b> <span class="muted">({conversion})</span></td><td>{rub(p['revenue'])}</td>
+<td><details class="del"><summary>Удалить</summary>
+  <form method="post" action="{base}/promo/{code}/delete"><span class="muted">Точно удалить {code}?</span>
+  <button class="danger" type="submit">Да, удалить</button></form></details></td></tr>"""
 
 
 # ---------- Аналитика пути пользователя ----------
@@ -402,7 +420,7 @@ def label(name: str) -> str:
     from .analytics import LABELS
 
     if name.startswith("admin_"):
-        return {"admin_price": "Админ: цена", "admin_full_free": "Админ: бесплатный режим", "admin_promo_add": "Админ: промокод",
+        return {"admin_price": "Админ: цена", "admin_full_free": "Админ: бесплатный режим", "admin_promo_add": "Админ: промокод", "admin_promo_delete": "Админ: удалён промокод",
                 "admin_login": "Админ: вход", "admin_login_failed": "Админ: неверный пароль"}.get(name, name)
     return LABELS.get(name, name)
 

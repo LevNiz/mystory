@@ -260,6 +260,10 @@ class Database:
             (percent, int(active), note, code),
         )
 
+    def delete_promo(self, code: str) -> None:
+        # Платежи с этим кодом остаются в истории (код записан в самом платеже).
+        self._q("DELETE FROM promos WHERE code = ?", (code,))
+
     def promo_visit(self, code: str, unique: bool) -> None:
         self._q(
             "UPDATE promos SET visits = visits + 1, uniques = uniques + ? WHERE code = ?",
