@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from .pricing import base_price, discounted, normalize_code, parse_price
@@ -30,11 +30,29 @@ MSK = timezone(timedelta(hours=3))
 
 
 def build_router(
-    *, path: str, password: str, public_url: str, db: Any, default_price: str, secure: bool, rate: Callable[..., None]
+    *,
+    path: str,
+    password: str,
+    public_url: str,
+    db: Any,
+    default_price: str,
+    secure: bool,
+    rate: Callable[..., None],
+    allow_ips: frozenset[str] = frozenset(),
 ) -> APIRouter:
     base = "/" + path.strip("/")
     secret = hashlib.sha256(f"mystory-admin:{password}:{path}".encode()).digest()
-    router = APIRouter()
+
+    def ip_allowed(request: Request) -> None:
+        # Необязательный список IP из .env: с остальных адресов админка выглядит как 404.
+        if allow_ips and (request.headers.get("x-real-ip") or (request.client.host if request.client else "")) not in allow_ips:
+            raise HTTPException(status_code=404)
+
+    router = APIRouter(dependencies=[Depends(ip_allowed)])
+
+    def audit(request: Request, name: str, meta: dict[str, Any]) -> None:
+        """Журнал действий в админке — видно в аналитике (события admin_*)."""
+        db.add_event(name, "admin", None, {**meta, "ip": ip(request)})
 
     def sign(expires: int) -> str:
         mac = hmac.new(secret, str(expires).encode(), hashlib.sha256).hexdigest()
@@ -65,6 +83,24 @@ def build_router(
         data = await asyncio.to_thread(collect, db, default_price)
         return HTMLResponse(dashboard(base, public_url, data, request.query_params.get("msg", "")), headers=NO_INDEX)
 
+    @router.get(f"{base}/stats")
+    async def stats(request: Request) -> Response:
+        if not authed(request):
+            return back()
+        days = request.query_params.get("days", "30")
+        period = {"1": 1, "7": 7, "30": 30, "all": 3650}.get(days, 30)
+        data = await asyncio.to_thread(collect_stats, db, period)
+        return HTMLResponse(stats_page(base, data, days if days in {"1", "7", "30", "all"} else "30"), headers=NO_INDEX)
+
+    @router.get(f"{base}/book/{{book_id}}")
+    async def book_detail(book_id: str, request: Request) -> Response:
+        if not authed(request):
+            return back()
+        data = await asyncio.to_thread(db.book_timeline, book_id[:40])
+        if data is None:
+            raise HTTPException(status_code=404)
+        return HTMLResponse(book_page(base, data), headers=NO_INDEX)
+
     @router.post(f"{base}/login")
     async def login(request: Request) -> Response:
         if not same_origin(request):
@@ -72,8 +108,10 @@ def build_router(
         rate(f"admin-login:{ip(request)}", 3600, 10)
         form = await request.form()
         if not hmac.compare_digest(str(form.get("password", "")).encode(), password.encode()):
+            await asyncio.to_thread(audit, request, "admin_login_failed", {})
             await asyncio.sleep(1)
             return back("wrong")
+        await asyncio.to_thread(audit, request, "admin_login", {})
         response = back()
         response.set_cookie(
             SESSION_COOKIE, sign(int(time.time()) + SESSION_TTL), max_age=SESSION_TTL,
@@ -96,6 +134,7 @@ def build_router(
         if price is None:
             return back("bad_price")
         await asyncio.to_thread(db.set_setting, "price_rub", price)
+        await asyncio.to_thread(audit, request, "admin_price", {"price": price})
         return back("price_saved")
 
     @router.post(f"{base}/full-free")
@@ -105,6 +144,7 @@ def build_router(
         form = await request.form()
         enabled = form.get("enabled") == "1"
         await asyncio.to_thread(db.set_setting, "full_free", "1" if enabled else "0")
+        await asyncio.to_thread(audit, request, "admin_full_free", {"enabled": enabled})
         return back("free_on" if enabled else "free_off")
 
     @router.post(f"{base}/promo")
@@ -118,6 +158,7 @@ def build_router(
         if code is None or percent is None:
             return back("bad_promo")
         ok = await asyncio.to_thread(db.add_promo, code, percent, str(form.get("note", ""))[:120])
+        await asyncio.to_thread(audit, request, "admin_promo_add", {"code": code, "percent": percent})
         return back("promo_added" if ok else "promo_exists")
 
     @router.post(f"{base}/promo/{{code}}")
@@ -199,6 +240,12 @@ th{color:#8a8c93;font-weight:500;border-top:0}
 .msg{padding:10px 14px;border-radius:10px;margin-bottom:16px}.ok{background:#e6f6ee;color:#1f6f49}.err{background:#fdecea;color:#a1301d}
 .off{opacity:.5}.free-on{border-color:#2f9e6a;background:#f3fbf7}.tag{padding:2px 8px;border-radius:99px;font-size:12px;background:#f0efea}.tag.paid{background:#e6f6ee;color:#1f6f49}
 .login{max-width:360px;margin:15vh auto;display:flex;flex-direction:column;gap:12px}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto;margin-right:12px}.tabs.small{margin:0}
+.tab{padding:7px 14px;border-radius:999px;border:1px solid #d9d6cf;background:#fff;color:#16171b;text-decoration:none;font-size:14px}
+.tab.on{background:#16171b;color:#fff;border-color:#16171b}
+.bar{height:10px;border-radius:99px;background:#eeece7;overflow:hidden}.bar span{display:block;height:100%;background:linear-gradient(90deg,#f0623a,#f5a35c)}
+.num{text-align:right;font-variant-numeric:tabular-nums}.small{font-size:12px;white-space:normal}
+a{color:#16171b}
 @media(max-width:700px){.stats{grid-template-columns:repeat(2,1fr)}}
 """
 
@@ -266,8 +313,7 @@ def dashboard(base: str, public_url: str, data: dict[str, Any], msg: str) -> str
     return shell(
         "Админка — Книга моей жизни",
         f"""<div class="wrap">
-<header><h1>Книга моей жизни · админка</h1>
-<form method="post" action="{base}/logout"><button class="ghost" type="submit">Выйти</button></form></header>
+{admin_nav(base, "settings")}
 {notice(msg)}
 <div class="stats">
   <div><b>{totals["paid"]}</b><span>оплат</span></div>
@@ -326,3 +372,157 @@ def promo_row(base: str, public_url: str, p: dict[str, Any], price: str) -> str:
 <td><span class="link">{esc(link)}</span></td>
 <td>{p['visits']}</td><td>{p['uniques']}</td><td>{p['checkouts']}</td>
 <td><b>{p['paid']}</b> <span class="muted">({conversion})</span></td><td>{rub(p['revenue'])}</td></tr>"""
+
+
+# ---------- Аналитика пути пользователя ----------
+
+def admin_nav(base: str, active: str) -> str:
+    tabs = [("settings", base, "Цена и промокоды"), ("stats", f"{base}/stats", "Аналитика и пользователи")]
+    links = "".join(f'<a class="tab {"on" if key == active else ""}" href="{href}">{label}</a>' for key, href, label in tabs)
+    return f"""<header><h1>Книга моей жизни · админка</h1>
+<nav class="tabs">{links}</nav>
+<form method="post" action="{base}/logout"><button class="ghost" type="submit">Выйти</button></form></header>"""
+
+
+def collect_stats(db: Any, days: int) -> dict[str, Any]:
+    from .analytics import FUNNEL
+
+    since = int(time.time()) - days * 86_400
+    counts = db.funnel([name for name, _ in FUNNEL], since)
+    return {
+        "funnel": [(name, label, counts.get(name, 0)) for name, label in FUNNEL],
+        "sources": db.sources(since),
+        "daily": db.daily(min(days, 30)),
+        "events": db.event_counts(since),
+        "books": db.recent_books(40),
+    }
+
+
+def label(name: str) -> str:
+    from .analytics import LABELS
+
+    if name.startswith("admin_"):
+        return {"admin_price": "Админ: цена", "admin_full_free": "Админ: бесплатный режим", "admin_promo_add": "Админ: промокод",
+                "admin_login": "Админ: вход", "admin_login_failed": "Админ: неверный пароль"}.get(name, name)
+    return LABELS.get(name, name)
+
+
+def progress(data_json: str | None) -> tuple[int, int]:
+    import json as _json
+
+    from .analytics import FREE_IDS, answered_ids
+
+    try:
+        data = _json.loads(data_json or "{}")
+    except ValueError:
+        return 0, 0
+    ids = answered_ids(data)
+    return len(ids & FREE_IDS), len(ids - FREE_IDS)
+
+
+def stats_page(base: str, data: dict[str, Any], days: str) -> str:
+    periods = "".join(
+        f'<a class="tab {"on" if key == days else ""}" href="{base}/stats?days={key}">{name}</a>'
+        for key, name in (("1", "Сутки"), ("7", "7 дней"), ("30", "30 дней"), ("all", "Всё время"))
+    )
+    top = max([n for _, _, n in data["funnel"]] + [1])
+    rows, prev = [], None
+    for name, title, n in data["funnel"]:
+        step = f"{n / prev * 100:.0f} %" if prev else "—"
+        rows.append(
+            f"""<tr><td>{esc(title)}</td><td class="num"><b>{n}</b></td>
+            <td style="width:40%"><div class="bar"><span style="width:{n / top * 100:.1f}%"></span></div></td>
+            <td class="muted num">{step}</td><td class="muted num">{(n / top * 100) if top else 0:.0f} %</td></tr>"""
+        )
+        prev = n or None
+    sources = "".join(
+        f"<tr><td>{esc(x['source'])}</td><td class='num'>{x['visitors']}</td><td class='num'>{x['started']}</td>"
+        f"<td class='num'>{x['paid']}</td></tr>"
+        for x in data["sources"]
+    ) or "<tr><td colspan='4' class='muted'>Пока нет визитов</td></tr>"
+    daily = "".join(
+        f"<tr><td>{esc(d['day'])}</td><td class='num'>{d['visits']}</td><td class='num'>{d['books']}</td><td class='num'>{d['free_done']}</td>"
+        f"<td class='num'>{d['offers']}</td><td class='num'><b>{d['paid']}</b></td></tr>"
+        for d in data["daily"]
+    ) or "<tr><td colspan='6' class='muted'>Нет данных</td></tr>"
+    events = "".join(
+        f"<tr><td>{esc(label(e['name']))}</td><td class='muted'>{esc(e['name'])}</td><td class='num'>{e['total']}</td><td class='num'>{e['people']}</td></tr>"
+        for e in data["events"]
+    ) or "<tr><td colspan='4' class='muted'>Нет событий</td></tr>"
+    books = []
+    for b in data["books"]:
+        free_n, full_n = progress(b["data"])
+        books.append(
+            f"""<tr><td><a href="{base}/book/{esc(b['id'])}">{esc(b['id'][:8])}</a></td>
+            <td>{when(b['created_at'])}</td><td class="muted">{when(b['last_seen']) if b['last_seen'] else '—'}</td>
+            <td>{esc(b['source'] or '—')}</td><td>{free_n}/12 · {full_n}</td>
+            <td>{'<span class="tag paid">оплачена</span>' if b['paid'] else '—'}</td><td>{esc(b['promo'] or '—')}</td>
+            <td class="muted small">{esc(' ← '.join(label(n) for n in (b['last_events'] or '').split(' → ') if n))}</td></tr>"""
+        )
+    return shell(
+        "Аналитика — Книга моей жизни",
+        f"""<div class="wrap">{admin_nav(base, "stats")}
+<nav class="tabs small">{periods}</nav><br>
+<section class="card"><h2>Воронка</h2>
+<table><thead><tr><th>Шаг</th><th>Людей</th><th></th><th>От прошлого шага</th><th>От первого</th></tr></thead><tbody>{''.join(rows)}</tbody></table>
+<p class="muted">Считаются уникальные посетители (по анонимной cookie). Шаги «начали», «ответили», «оплатили», «собрали текст» фиксирует сервер, остальные — интерфейс.</p></section>
+<section class="card"><h2>Источники</h2>
+<table><thead><tr><th>Откуда</th><th>Посетители</th><th>Начали книгу</th><th>Оплатили</th></tr></thead><tbody>{sources}</tbody></table>
+<p class="muted">По utm_source или сайту, с которого перешли. Для рекламы добавляй к ссылке ?utm_source=название.</p></section>
+<section class="card"><h2>По дням (МСК)</h2>
+<table><thead><tr><th>День</th><th>Визиты</th><th>Начали</th><th>12 ответов</th><th>Предложение</th><th>Оплаты</th></tr></thead><tbody>{daily}</tbody></table></section>
+<section class="card"><h2>Пользователи</h2>
+<table><thead><tr><th>Книга</th><th>Создана</th><th>Был</th><th>Источник</th><th>Ответы (беспл./полн.)</th><th>Оплата</th><th>Промокод</th><th>Последние действия</th></tr></thead>
+<tbody>{''.join(books) or "<tr><td colspan='8' class='muted'>Пока нет книг</td></tr>"}</tbody></table>
+<p class="muted">Тексты ответов в админке не показываются — только факты и прогресс.</p></section>
+<section class="card"><h2>Все события за период</h2>
+<table><thead><tr><th>Событие</th><th>Код</th><th>Раз</th><th>Людей</th></tr></thead><tbody>{events}</tbody></table></section>
+</div>""",
+    )
+
+
+def book_page(base: str, data: dict[str, Any]) -> str:
+    import json as _json
+
+    b = data["book"]
+    free_n, full_n = progress(b.get("data"))
+    try:
+        book_data = _json.loads(b.get("data") or "{}")
+        ai_count = len(_json.loads(b.get("ai") or "{}"))
+    except ValueError:
+        book_data, ai_count = {}, 0
+    profile = book_data.get("profile") or {}
+    timeline = "".join(
+        f"<tr><td>{when(e['at'])}</td><td>{esc(label(e['name']))}</td><td class='muted small'>{esc(e['meta'] or '')}</td></tr>"
+        for e in data["events"]
+    ) or "<tr><td colspan='3' class='muted'>Событий нет</td></tr>"
+    pays = "".join(
+        f"<tr><td>{when(p['created_at'])}</td><td>{rub(p['amount'])}</td><td>{esc(p.get('promo') or '—')}</td>"
+        f"<td><span class='tag {esc(p['status'])}'>{STATUS.get(p['status'], esc(p['status']))}</span></td><td class='muted'>№ {esc(p.get('provider_id'))}</td></tr>"
+        for p in data["payments"]
+    ) or "<tr><td colspan='5' class='muted'>Платежей нет</td></tr>"
+    photos = sum(data["photos"].values())
+    return shell(
+        "Пользователь — Книга моей жизни",
+        f"""<div class="wrap">{admin_nav(base, "stats")}
+<p><a href="{base}/stats">← Все пользователи</a></p>
+<div class="stats">
+  <div><b>{free_n}/12</b><span>бесплатных ответов</span></div>
+  <div><b>{full_n}</b><span>ответов полной книги</span></div>
+  <div><b>{ai_count}</b><span>глав с литературным текстом</span></div>
+  <div><b>{photos}</b><span>фото</span></div>
+</div><br>
+<section class="card"><h2>Книга {esc(b['id'][:8])}</h2>
+<table><tbody>
+<tr><td class="muted">Создана</td><td>{when(b['created_at'])}</td></tr>
+<tr><td class="muted">Последняя активность</td><td>{when(b['last_seen']) if b.get('last_seen') else '—'}</td></tr>
+<tr><td class="muted">Источник</td><td>{esc(b.get('source') or '—')}</td></tr>
+<tr><td class="muted">Оплата</td><td>{'оплачена' if b['paid'] else 'нет'}</td></tr>
+<tr><td class="muted">Пол в книге</td><td>{'она' if profile.get('gender') == 'f' else 'он'}</td></tr>
+<tr><td class="muted">Последний IP (без последнего октета)</td><td>{esc(b.get('last_ip') or '—')}</td></tr>
+<tr><td class="muted">Браузер</td><td class="small">{esc(b.get('last_ua') or '—')}</td></tr>
+</tbody></table></section>
+<section class="card"><h2>Платежи</h2><table><thead><tr><th>Когда</th><th>Сумма</th><th>Промокод</th><th>Статус</th><th>UrlPay</th></tr></thead><tbody>{pays}</tbody></table></section>
+<section class="card"><h2>Путь пользователя</h2><table><thead><tr><th>Когда (МСК)</th><th>Действие</th><th>Детали</th></tr></thead><tbody>{timeline}</tbody></table></section>
+</div>""",
+    )

@@ -38,6 +38,7 @@ class Settings:
 
     admin_path: str
     admin_password: str
+    admin_allow_ips: frozenset[str]
 
     @property
     def ai_enabled(self) -> bool:
@@ -75,4 +76,6 @@ def load_settings() -> Settings:
         # Админка: скрытый адрес и пароль. Пустые — админка выключена.
         admin_path=_env("ADMIN_PATH").strip("/"),
         admin_password=_env("ADMIN_PASSWORD"),
+        # Необязательный список IP, с которых пускать в админку (через запятую). Пусто — откуда угодно.
+        admin_allow_ips=frozenset(x.strip() for x in _env("ADMIN_ALLOW_IPS").split(",") if x.strip()),
     )

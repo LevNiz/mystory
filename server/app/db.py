@@ -65,6 +65,17 @@ CREATE TABLE IF NOT EXISTS promos (
     uniques     INTEGER NOT NULL DEFAULT 0,
     created_at  INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    at          INTEGER NOT NULL,
+    visitor     TEXT,
+    book_id     TEXT,
+    name        TEXT NOT NULL,
+    meta        TEXT
+);
+CREATE INDEX IF NOT EXISTS events_name_at ON events (name, at);
+CREATE INDEX IF NOT EXISTS events_book ON events (book_id, at);
+CREATE INDEX IF NOT EXISTS events_visitor ON events (visitor, at);
 CREATE TABLE IF NOT EXISTS counters (
     key         TEXT PRIMARY KEY,
     value       INTEGER NOT NULL,
@@ -90,9 +101,14 @@ class Database:
                     "SELECT book_id, chapter_id || '-1', chapter_id, src, caption, 1, updated_at FROM photos"
                 )
             # Колонки, добавленные после первого запуска.
-            for column in ("email TEXT", "pay_url TEXT", "qr_link TEXT", "promo TEXT", "base_amount TEXT"):
+            for table, column in (
+                ("payments", "email TEXT"), ("payments", "pay_url TEXT"), ("payments", "qr_link TEXT"),
+                ("payments", "promo TEXT"), ("payments", "base_amount TEXT"),
+                ("books", "visitor TEXT"), ("books", "source TEXT"), ("books", "last_seen INTEGER"),
+                ("books", "last_ip TEXT"), ("books", "last_ua TEXT"),
+            ):
                 try:
-                    self._conn.execute(f"ALTER TABLE payments ADD COLUMN {column}")
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
                 except sqlite3.OperationalError:
                     pass
 
@@ -102,11 +118,20 @@ class Database:
 
     # --- Книги ---
 
-    def create_book(self, book_id: str, token_hash: str) -> None:
+    def create_book(self, book_id: str, token_hash: str, visitor: str | None = None, source: str | None = None) -> None:
         now = int(time.time())
         self._q(
-            "INSERT INTO books (id, token_hash, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (book_id, token_hash, now, now),
+            "INSERT INTO books (id, token_hash, visitor, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (book_id, token_hash, visitor, source, now, now),
+        )
+
+    def set_token(self, book_id: str, token_hash: str) -> None:
+        self._q("UPDATE books SET token_hash = ? WHERE id = ?", (token_hash, book_id))
+
+    def touch(self, book_id: str, ip: str, ua: str) -> None:
+        self._q(
+            "UPDATE books SET last_seen = ?, last_ip = ?, last_ua = ? WHERE id = ?",
+            (int(time.time()), ip, ua, book_id),
         )
 
     def book_by_token(self, token_hash: str) -> dict[str, Any] | None:
@@ -285,6 +310,99 @@ class Database:
             "UPDATE payments SET status = ?, updated_at = ? WHERE uuid = ?",
             (status, int(time.time()), uuid),
         )
+
+    # --- События (путь пользователя) ---
+
+    def add_event(self, name: str, visitor: str | None, book_id: str | None, meta: dict[str, Any] | None = None) -> None:
+        self._q(
+            "INSERT INTO events (at, visitor, book_id, name, meta) VALUES (?, ?, ?, ?, ?)",
+            (int(time.time()), visitor, book_id, name, json.dumps(meta, ensure_ascii=False) if meta else None),
+        )
+
+    def visitor_source(self, visitor: str | None) -> str | None:
+        if not visitor:
+            return None
+        rows = self._q(
+            "SELECT json_extract(meta, '$.source') AS source FROM events WHERE visitor = ? AND name = 'visit' ORDER BY at LIMIT 1",
+            (visitor,),
+        )
+        return rows[0]["source"] if rows else None
+
+    def funnel(self, names: list[str], since: int) -> dict[str, int]:
+        """Уникальные посетители (или книги без посетителя) по каждому шагу за период."""
+        marks = ",".join("?" * len(names))
+        rows = self._q(
+            f"SELECT name, COUNT(DISTINCT COALESCE(visitor, book_id)) AS n FROM events "
+            f"WHERE at >= ? AND name IN ({marks}) GROUP BY name",
+            (since, *names),
+        )
+        return {r["name"]: r["n"] for r in rows}
+
+    def event_counts(self, since: int) -> list[dict[str, Any]]:
+        rows = self._q(
+            "SELECT name, COUNT(*) AS total, COUNT(DISTINCT COALESCE(visitor, book_id)) AS people "
+            "FROM events WHERE at >= ? GROUP BY name ORDER BY total DESC",
+            (since,),
+        )
+        return [dict(r) for r in rows]
+
+    def sources(self, since: int) -> list[dict[str, Any]]:
+        rows = self._q(
+            """SELECT COALESCE(json_extract(v.meta, '$.source'), 'прямой заход') AS source,
+                      COUNT(DISTINCT v.visitor) AS visitors,
+                      COUNT(DISTINCT b.visitor) AS started,
+                      COUNT(DISTINCT CASE WHEN p.name = 'paid' THEN p.visitor END) AS paid
+               FROM events v
+               LEFT JOIN events b ON b.visitor = v.visitor AND b.name = 'book_created'
+               LEFT JOIN events p ON p.visitor = v.visitor AND p.name = 'paid'
+               WHERE v.name = 'visit' AND v.at >= ? AND v.visitor IS NOT NULL
+               GROUP BY source ORDER BY visitors DESC LIMIT 20""",
+            (since,),
+        )
+        return [dict(r) for r in rows]
+
+    def daily(self, days: int) -> list[dict[str, Any]]:
+        since = int(time.time()) - days * 86_400
+        rows = self._q(
+            """SELECT date(at, 'unixepoch', '+3 hours') AS day,
+                      COUNT(DISTINCT CASE WHEN name = 'visit' THEN visitor END) AS visits,
+                      COUNT(DISTINCT CASE WHEN name = 'book_created' THEN book_id END) AS books,
+                      COUNT(DISTINCT CASE WHEN name = 'free_finished' THEN book_id END) AS free_done,
+                      COUNT(DISTINCT CASE WHEN name = 'offer_view' THEN COALESCE(visitor, book_id) END) AS offers,
+                      COUNT(DISTINCT CASE WHEN name = 'paid' THEN book_id END) AS paid
+               FROM events WHERE at >= ? GROUP BY day ORDER BY day DESC""",
+            (since,),
+        )
+        return [dict(r) for r in rows]
+
+    def recent_books(self, limit: int = 40) -> list[dict[str, Any]]:
+        rows = self._q(
+            """SELECT b.id, b.created_at, b.paid, b.source, b.last_seen, b.data,
+                      (SELECT GROUP_CONCAT(name, ' → ') FROM (SELECT name FROM events e WHERE e.book_id = b.id ORDER BY e.at DESC LIMIT 6)) AS last_events,
+                      (SELECT promo FROM payments p WHERE p.book_id = b.id AND p.promo IS NOT NULL LIMIT 1) AS promo
+               FROM books b ORDER BY COALESCE(b.last_seen, b.updated_at) DESC LIMIT ?""",
+            (limit,),
+        )
+        return [dict(r) for r in rows]
+
+    def book_timeline(self, book_id: str) -> dict[str, Any] | None:
+        rows = self._q("SELECT * FROM books WHERE id = ?", (book_id,))
+        if not rows:
+            return None
+        book = dict(rows[0])
+        visitor = book.get("visitor")
+        events = self._q(
+            "SELECT at, name, meta FROM events WHERE book_id = ? OR (visitor IS NOT NULL AND visitor = ?) ORDER BY at, id",
+            (book_id, visitor),
+        )
+        pays = self._q("SELECT * FROM payments WHERE book_id = ? ORDER BY created_at", (book_id,))
+        photos = self._q("SELECT chapter_id, COUNT(*) AS n FROM chapter_photos WHERE book_id = ? GROUP BY chapter_id", (book_id,))
+        return {
+            "book": book,
+            "events": [dict(e) for e in events],
+            "payments": [dict(p) for p in pays],
+            "photos": {r["chapter_id"]: r["n"] for r in photos},
+        }
 
     # --- Лимиты ---
 

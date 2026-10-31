@@ -14,16 +14,19 @@ import re
 import secrets
 import time
 import uuid as uuid_lib
+from html import escape as html_escape
+from urllib.parse import urlparse
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import segno
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .admin import build_router as admin_router
+from .analytics import CLIENT_EVENTS, clean_meta, milestones, visit_source
 from .ai import AIBusy, AIClient, AIError
 from .config import load_settings
 from .content import Content, gendered
@@ -37,6 +40,7 @@ log = logging.getLogger("mystory")
 settings = load_settings()
 db = Database(settings.db_path)
 content = Content(settings.web_dir / "js" / "questions.js")
+FULL_QUESTIONS = sum(len(c.questions) for cid, c in content.full_chapters.items() if cid != "intro")
 urlpay = (
     UrlPay(settings.urlpay_api_key, settings.urlpay_secret_key, settings.urlpay_shop_id)
     if settings.payments_enabled
@@ -44,7 +48,11 @@ urlpay = (
 )
 ai: AIClient | None = None
 
-COOKIE = "ms_book"
+# Префикс __Host- (только по HTTPS): cookie нельзя подложить с поддомена или задать для другого пути.
+COOKIE = "__Host-ms_book" if settings.cookie_secure else "ms_book"
+LEGACY_COOKIE = "ms_book"
+VISITOR_COOKIE = "__Host-ms_vid" if settings.cookie_secure else "ms_vid"
+VISITOR_ID = re.compile(r"^[A-Za-z0-9_-]{16,40}$")
 COOKIE_MAX_AGE = 60 * 60 * 24 * 365 * 2
 MAX_STATE_BYTES = 600_000
 MAX_PHOTO_BYTES = 3_000_000
@@ -57,6 +65,12 @@ LIMITS = {
 }
 AI_PER_IP_HOUR = 200
 BOOKS_PER_IP_HOUR = 30
+BOOKS_PER_IP_DAY = 100
+STATE_SAVES_PER_BOOK_10MIN = 400
+EVENTS_PER_VISITOR_HOUR = 400
+PAYMENTS_PER_EMAIL_DAY = 5
+PAYMENTS_PER_IP_DAY = 30
+RECOVERY_PER_IP_HOUR = 60
 PAYMENTS_PER_BOOK_HOUR = 10
 
 PAYMENT_DESCRIPTION = "Полная книга моей жизни"
@@ -126,8 +140,16 @@ CSP = "; ".join(
 @app.middleware("http")
 async def guard(request: Request, call_next):
     path = request.url.path
-    if path.startswith("/api/") and request.method in {"POST", "PUT", "DELETE", "PATCH"}:
-        # Защита от CSRF: кросс-сайтовая форма не может выставить этот заголовок.
+    mutating = request.method in {"POST", "PUT", "DELETE", "PATCH"}
+    if mutating and (path.startswith("/api/") or path.startswith("/r/")):
+        # Защита от CSRF: запрос должен прийти с нашего же сайта.
+        if request.headers.get("sec-fetch-site") not in (None, "same-origin", "none"):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        origin = request.headers.get("origin")
+        if origin and urlparse(origin).netloc != request.headers.get("host", ""):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+    if path.startswith("/api/") and mutating:
+        # Кросс-сайтовая форма не может выставить этот заголовок.
         if request.headers.get("x-requested-with") != "mystory":
             return JSONResponse({"error": "forbidden"}, status_code=403)
         limit = MAX_PHOTO_BYTES + 50_000 if path.startswith("/api/photo/") else MAX_STATE_BYTES
@@ -143,6 +165,20 @@ async def guard(request: Request, call_next):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "microphone=(self), camera=(), geolocation=()"
     response.headers["Content-Security-Policy"] = CSP
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+
+    # Переезд со старой cookie на __Host- и выдача идентификатора посетителя.
+    renew = getattr(request.state, "renew_token", None)
+    if renew:
+        set_cookie(response, renew)
+        response.delete_cookie(LEGACY_COOKIE, path="/")
+    new_visitor = getattr(request.state, "new_visitor", None)
+    if new_visitor:
+        response.set_cookie(
+            VISITOR_COOKIE, new_visitor, max_age=COOKIE_MAX_AGE, httponly=True,
+            secure=settings.cookie_secure, samesite="lax", path="/",
+        )
     # HSTS ставит общий nginx (snippets/ssl-params.conf), чтобы заголовок не дублировался.
 
     if path.startswith("/api/") or path.startswith("/r/"):
@@ -171,6 +207,10 @@ def full_free() -> bool:
 
 def current_book(request: Request) -> dict[str, Any] | None:
     token = request.cookies.get(COOKIE)
+    if not token and COOKIE != LEGACY_COOKIE:
+        token = request.cookies.get(LEGACY_COOKIE)
+        if token:
+            request.state.renew_token = token
     if not token or len(token) > 100:
         return None
     book = db.book_by_token(token_hash(token))
@@ -179,6 +219,28 @@ def current_book(request: Request) -> dict[str, Any] | None:
         book["purchased"] = book["paid"]
         book["paid"] = book["paid"] or full_free()
     return book
+
+
+def visitor_id(request: Request) -> str:
+    """Анонимный идентификатор посетителя — чтобы видеть путь ещё до создания книги."""
+    vid = request.cookies.get(VISITOR_COOKIE, "")
+    if not VISITOR_ID.match(vid):
+        vid = getattr(request.state, "new_visitor", None) or secrets.token_urlsafe(18)
+        request.state.new_visitor = vid
+    return vid
+
+
+def track(name: str, request: Request | None, book: dict[str, Any] | None = None, meta: dict[str, Any] | None = None) -> None:
+    visitor = visitor_id(request) if request is not None else (book or {}).get("visitor")
+    db.add_event(name, visitor, book["id"] if book else None, meta)
+
+
+def short_ip(ip: str) -> str:
+    """IP без последнего октета — для админки достаточно, полный адрес не храним."""
+    if ":" in ip:
+        return ":".join(ip.split(":")[:3]) + "::"
+    parts = ip.split(".")
+    return ".".join(parts[:3] + ["0"]) if len(parts) == 4 else ip[:40]
 
 
 def set_cookie(response: Response, token: str) -> None:
@@ -242,6 +304,7 @@ def features(request: Request) -> dict[str, Any]:
 @app.get("/api/state")
 async def get_state(request: Request) -> dict[str, Any]:
     book = await asyncio.to_thread(current_book, request)
+    visitor_id(request)
     return {**public_state(book), "features": features(request)}
 
 
@@ -252,19 +315,47 @@ async def put_state(request: Request) -> Response:
     if not isinstance(data, dict):
         raise HTTPException(status_code=400, detail="bad_data")
     data.pop("paid", None)  # статус оплаты знает только сервер
+    data.pop("events", None)  # события теперь пишутся на сервере, а не в книге
 
     book = await asyncio.to_thread(current_book, request)
     response = JSONResponse({"ok": True})
+    ip = client_ip(request)
     if book is None:
-        rate(f"books:{client_ip(request)}", 3600, BOOKS_PER_IP_HOUR)
+        rate(f"books:{ip}", 3600, BOOKS_PER_IP_HOUR)
+        rate(f"books-day:{ip}", DAY, BOOKS_PER_IP_DAY)
         token = secrets.token_urlsafe(32)
         book_id = str(uuid_lib.uuid4())
-        await asyncio.to_thread(db.create_book, book_id, token_hash(token))
+        vid = visitor_id(request)
+        await asyncio.to_thread(db.create_book, book_id, token_hash(token), vid, db.visitor_source(vid))
         set_cookie(response, token)
+        book = {"id": book_id, "data": {}, "visitor": vid}
+        track("book_created", request, book)
     else:
         book_id = book["id"]
+        rate(f"saves:{book_id}", 600, STATE_SAVES_PER_BOOK_10MIN)
+    for name in milestones(book.get("data") or {}, data, FULL_QUESTIONS):
+        track(name, request, book)
     await asyncio.to_thread(db.save_data, book_id, data)
+    await asyncio.to_thread(db.touch, book_id, short_ip(ip), request.headers.get("user-agent", "")[:160])
     return response
+
+
+@app.post("/api/event")
+async def client_event(request: Request) -> dict[str, bool]:
+    """События интерфейса из белого списка (то, что сервер сам не видит)."""
+    body = await read_json(request)
+    name = str(body.get("name") or "")
+    if name not in CLIENT_EVENTS:
+        raise HTTPException(status_code=400, detail="bad_event")
+    vid = visitor_id(request)
+    rate(f"events:{vid}", 3600, EVENTS_PER_VISITOR_HOUR)
+    rate(f"events-ip:{client_ip(request)}", 3600, EVENTS_PER_VISITOR_HOUR * 3)
+    meta = clean_meta(body.get("meta"))
+    if name == "visit":
+        meta["source"] = visit_source(meta, urlparse(settings.public_url).netloc)
+    book = await asyncio.to_thread(current_book, request)
+    await asyncio.to_thread(track, name, request, book, meta or None)
+    return {"ok": True}
 
 
 MAX_PHOTOS_PER_CHAPTER = 6
@@ -289,6 +380,7 @@ async def add_photo(chapter_id: str, request: Request) -> dict[str, str]:
         raise HTTPException(status_code=409, detail="too_many_photos")
     photo_id = f"{chapter_id}-{secrets.token_urlsafe(6)}"
     await asyncio.to_thread(db.add_photo, book["id"], chapter_id, photo_id, src, str(body.get("caption") or "")[:200])
+    track("photo_added", request, book, {"chapter": chapter_id})
     return {"id": photo_id}
 
 
@@ -314,15 +406,71 @@ async def delete_photo(chapter_id: str, photo_id: str, request: Request) -> dict
 @app.get("/api/recovery-link")
 async def recovery_link(request: Request) -> dict[str, str]:
     require_book(request)
-    return {"url": f"{settings.public_url}/r/{request.cookies[COOKIE]}"}
+    token = request.cookies.get(COOKIE) or getattr(request.state, "renew_token", "")
+    return {"url": f"{settings.public_url}/r/{token}"}
+
+
+@app.post("/api/recovery-link/rotate")
+async def rotate_recovery_link(request: Request) -> Response:
+    """Новая личная ссылка: старая перестаёт открывать книгу (если ею поделились случайно)."""
+    book = require_book(request)
+    rate(f"rotate:{book['id']}", 3600, 10)
+    token = secrets.token_urlsafe(32)
+    await asyncio.to_thread(db.set_token, book["id"], token_hash(token))
+    track("link_rotated", request, book)
+    response = JSONResponse({"url": f"{settings.public_url}/r/{token}"})
+    set_cookie(response, token)
+    return response
+
+
+def recovery_page(title: str, author: str, token: str, replacing: bool) -> str:
+    warn = (
+        "<p class='warn'>В этом браузере уже открыта другая книга. После перехода она останется на сервере, "
+        "но открыть её снова получится только по её личной ссылке.</p>"
+        if replacing
+        else ""
+    )
+    return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex">
+<title>Открыть книгу — Книга моей жизни</title><link rel="stylesheet" href="/css/styles.css">
+</head><body><main class="lost"><div class="lost__card">
+<p class="lost__code">Личная ссылка</p>
+<h1>Открыть книгу <em>«{html_escape(title)}»</em></h1>
+<p>{html_escape(author) + " · " if author else ""}Продолжай только если это твоя книга. Не открывай личные ссылки, которые прислали незнакомые люди: всё, что ты напишешь, увидит владелец ссылки.</p>
+{warn}
+<form class="lost__actions" method="post" action="/r/{token}">
+  <button class="btn btn--dark btn--lg" type="submit">Да, открыть мою книгу</button>
+  <a class="btn btn--ghost btn--lg" href="/">Отмена</a>
+</form></div></main></body></html>"""
 
 
 @app.get("/r/{token}")
-async def recover(token: str) -> Response:
-    if len(token) > 100 or db.book_by_token(token_hash(token)) is None:
+async def recover(token: str, request: Request) -> Response:
+    rate(f"recover:{client_ip(request)}", 3600, RECOVERY_PER_IP_HOUR)
+    target = db.book_by_token(token_hash(token)) if len(token) <= 100 else None
+    if target is None:
         return RedirectResponse("/#/", status_code=302)
-    response = RedirectResponse("/#/book", status_code=302)
+    current = current_book(request)
+    if current and current["id"] == target["id"]:
+        return RedirectResponse("/#/book", status_code=302)
+    # Не подменяем книгу молча: страница подтверждения защищает от фишинговых ссылок
+    # (злоумышленник присылает ссылку на свою книгу и читает, что в неё напишут).
+    data = target.get("data") or {}
+    title = str((data.get("book") or {}).get("title") or "").strip() or "Моя история"
+    author = str((data.get("profile") or {}).get("name") or "").strip()
+    page = recovery_page(title, author, token, replacing=current is not None)
+    return HTMLResponse(page, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+
+@app.post("/r/{token}")
+async def recover_confirm(token: str, request: Request) -> Response:
+    rate(f"recover:{client_ip(request)}", 3600, RECOVERY_PER_IP_HOUR)
+    target = db.book_by_token(token_hash(token)) if len(token) <= 100 else None
+    if target is None:
+        return RedirectResponse("/#/", status_code=303)
+    response = RedirectResponse("/#/book", status_code=303)
     set_cookie(response, token)
+    track("recovered", request, target)
     return response
 
 
@@ -411,6 +559,7 @@ async def ai_chapter(request: Request) -> dict[str, Any]:
     if not text:
         raise HTTPException(status_code=502, detail="ai_empty")
 
+    track("ai_chapter", request, book, {"chapter": chapter_id})
     entry = {"text": text[:30000], "source": source, "at": int(time.time()), "edited": False}
     fresh = await asyncio.to_thread(db.book_by_id, book["id"])
     ai_state = (fresh or book)["ai"]
@@ -457,6 +606,7 @@ async def ai_followup(request: Request) -> dict[str, list[str]]:
         raise HTTPException(status_code=503, detail="ai_busy") from None
     except AIError:
         raise HTTPException(status_code=502, detail="ai_failed") from None
+    track("ai_followup", request, book)
     return {"questions": questions}
 
 
@@ -486,11 +636,16 @@ async def check_payment(payment: dict[str, Any]) -> str:
         result,
         {k: remote.get(k) for k in ("status", "payment_status", "state") if k in remote},
     )
-    if result == "paid":
-        await asyncio.to_thread(db.set_payment_status, payment["uuid"], "paid")
-        await asyncio.to_thread(db.mark_paid, payment["book_id"])
-    elif result in {"failed", "mismatch"}:
-        await asyncio.to_thread(db.set_payment_status, payment["uuid"], result)
+    if result in {"paid", "failed", "mismatch"}:
+        book = await asyncio.to_thread(db.book_by_id, payment["book_id"])
+        meta = {"amount": payment["amount"], "promo": payment.get("promo")}
+        if result == "paid":
+            await asyncio.to_thread(db.set_payment_status, payment["uuid"], "paid")
+            await asyncio.to_thread(db.mark_paid, payment["book_id"])
+            await asyncio.to_thread(track, "paid", None, book, meta)
+        else:
+            await asyncio.to_thread(db.set_payment_status, payment["uuid"], result)
+            await asyncio.to_thread(track, "payment_failed", None, book, {**meta, "status": result})
     return result
 
 
@@ -531,6 +686,9 @@ async def pay(request: Request) -> dict[str, Any]:
         return {"paid": False, "checkout": checkout(existing)}
 
     rate(f"pay:{book['id']}", 3600, PAYMENTS_PER_BOOK_HOUR)
+    # Против спама чеками: на один e-mail и с одного IP — ограниченное число счетов в сутки.
+    rate(f"pay-email:{hashlib.sha256(email.encode()).hexdigest()[:20]}", DAY, PAYMENTS_PER_EMAIL_DAY)
+    rate(f"pay-ip:{client_ip(request)}", DAY, PAYMENTS_PER_IP_DAY)
     payment_uuid = str(uuid_lib.uuid4())
     try:
         created = await urlpay.create(
@@ -560,6 +718,7 @@ async def pay(request: Request) -> dict[str, Any]:
         "payment_created book=%s uuid=%s provider_id=%s amount=%s promo=%s sbp=%s",
         book["id"], payment_uuid, created.payment_id, amount, promo_code, bool(sbp),
     )
+    track("payment_created", request, book, {"amount": amount, "promo": promo_code})
     payment = await asyncio.to_thread(db.payment, payment_uuid)
     return {"paid": False, "checkout": checkout(payment)}  # type: ignore[arg-type]
 
@@ -608,6 +767,7 @@ async def promo_link(code: str, request: Request) -> Response:
     if promo and promo["active"]:
         unique = request.cookies.get(PROMO_COOKIE) != promo["code"]
         await asyncio.to_thread(db.promo_visit, promo["code"], unique)
+        await asyncio.to_thread(track, "promo_visit", request, None, {"promo": promo["code"]})
         response.set_cookie(
             PROMO_COOKIE, promo["code"], max_age=30 * DAY, httponly=True, secure=settings.cookie_secure, samesite="lax", path="/"
         )
@@ -632,6 +792,7 @@ if settings.admin_path and len(settings.admin_password) >= 12:
             default_price=settings.price_rub,
             secure=settings.cookie_secure,
             rate=rate,
+            allow_ips=settings.admin_allow_ips,
         )
     )
 

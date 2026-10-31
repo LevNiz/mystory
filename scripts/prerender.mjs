@@ -21,7 +21,8 @@ const ctx = {
   console,
   setTimeout,
   clearTimeout,
-  location: { hash: '' },
+  location: { hash: '', search: '' },
+  URLSearchParams,
   document: {
     title: '',
     getElementById: (id) => (id === 'app' ? appEl : stub()),

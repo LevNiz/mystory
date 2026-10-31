@@ -802,3 +802,7 @@ kbd { font: 12px var(--sans); padding: 1px 6px; border-radius: 6px; border: 1px 
   .photo-preview input { font-size: 19px; }
   .photo-preview figcaption { gap: 8px; }
 }
+
+/* Личная ссылка: действия и страница подтверждения */
+.notice__actions { display: inline-flex; gap: 16px; flex-wrap: wrap; }
+.lost .warn { margin: -12px auto 24px !important; max-width: 460px; padding: 12px 14px; border-radius: var(--r-sm); background: var(--accent-soft); color: #9a3b1c !important; font-size: 15px !important; }

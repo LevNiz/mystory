@@ -14,7 +14,6 @@
     answers: {},
     book: { title: '', dedication: '', style: 'answers', aiSig: {}, paidSeen: false },
     last: null,
-    events: [],
   });
 
   let state = emptyData();
@@ -96,10 +95,35 @@
   });
 
   // Событие пишем в книгу и отправляем целью в Метрику (если счётчик подключён).
-  function track(name) {
-    state.events.push({ name, at: Date.now() });
-    if (state.events.length > 200) state.events.shift();
+  // События пути пользователя: цель в Метрике и запись на сервер (ключевые шаги сервер пишет сам).
+  const SERVER_EVENTS = new Set(['visit', 'example_view', 'offer_view', 'buy_click', 'checkout_view', 'paid_seen',
+    'ai_style', 'edit_open', 'pdf_free', 'pdf_full', 'recovery_copy']);
+  function track(name, meta) {
     if (window.analytics) window.analytics.goal(name);
+    if (!SERVER_EVENTS.has(name)) return;
+    fetch('/api/event', {
+      method: 'POST',
+      keepalive: true,
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'mystory' },
+      body: JSON.stringify({ name, meta }),
+    }).catch(() => {});
+  }
+
+  // Визит с источником — раз за сессию браузера.
+  function trackVisit() {
+    try {
+      if (sessionStorage.getItem('ms_visit')) return;
+      sessionStorage.setItem('ms_visit', '1');
+    } catch (e) { /* приватный режим — считаем визит каждый раз */ }
+    const q = new URLSearchParams(location.search);
+    track('visit', {
+      ref: document.referrer,
+      utm_source: q.get('utm_source') || '',
+      utm_medium: q.get('utm_medium') || '',
+      utm_campaign: q.get('utm_campaign') || '',
+      path: location.hash || '/',
+    });
   }
 
   // ---------- Утилиты ----------
@@ -444,6 +468,7 @@
   const isMobile = () => window.matchMedia('(max-width: 760px), (pointer: coarse)').matches;
 
   async function renderCheckout() {
+    if (!server.paid) track('checkout_view');
     if (server.paid) return renderPaidDone();
     app.innerHTML = `
     <div class="offer">
@@ -486,7 +511,7 @@
       tries++;
       try {
         const res = await api('POST', '/api/pay/check');
-        if (res.paid) { server.paid = true; checkoutData = null; track('paid'); flush(); renderPaidDone(); return; }
+        if (res.paid) { server.paid = true; server.purchased = true; checkoutData = null; flush(); renderPaidDone(); return; }
       } catch (e) { /* повторим */ }
       const status = document.getElementById('pay-status');
       if (status && tries > 100) status.textContent = 'Если деньги уже списались, подтверждение придёт в течение пары минут — можно обновить страницу.';
@@ -799,7 +824,7 @@
     });
 
     document.getElementById('next').addEventListener('click', () => {
-      if (!nextStep(t, state.last.ci, state.last.qi)) { track(`${t}_finished`); save(); }
+      if (!nextStep(t, state.last.ci, state.last.qi)) track(`${t}_finished`); // цель в Метрике; на сервере веха считается по ответам
     });
 
     // Голос
@@ -1061,6 +1086,8 @@
 
     const rec = document.getElementById('recovery');
     if (rec) rec.addEventListener('click', copyRecoveryLink);
+    const rot = document.getElementById('rotate');
+    if (rot) rot.addEventListener('click', rotateRecoveryLink);
   }
 
   function isStale(x) {
@@ -1109,7 +1136,10 @@
   function recoveryMarkup() {
     return `<div class="notice notice--soft">
       <span>${icon.link} Продолжить на другом устройстве — по личной ссылке. Не делись ею: по ней открывается твоя книга.</span>
-      <button type="button" class="link link--strong" id="recovery">Скопировать ссылку</button>
+      <span class="notice__actions">
+        <button type="button" class="link link--strong" id="recovery">Скопировать ссылку</button>
+        <button type="button" class="link" id="rotate" title="Если ссылкой случайно поделились — старая перестанет работать">Выпустить новую</button>
+      </span>
     </div>`;
   }
 
@@ -1117,6 +1147,7 @@
     try {
       await flush();
       const { url } = await api('GET', '/api/recovery-link');
+      track('recovery_copy');
       try {
         await navigator.clipboard.writeText(url);
         toast('Ссылка скопирована. Сохрани её в заметках или отправь себе.');
@@ -1125,6 +1156,23 @@
       }
     } catch (e) {
       toast('Сначала ответь хотя бы на один вопрос.');
+    }
+  }
+
+  // Новая личная ссылка: старая перестаёт открывать книгу (если ею поделились случайно).
+  async function rotateRecoveryLink() {
+    if (!confirm('Выпустить новую личную ссылку? Старая перестанет открывать книгу — на других устройствах нужно будет открыть новую.')) return;
+    try {
+      await flush();
+      const { url } = await api('POST', '/api/recovery-link/rotate');
+      try {
+        await navigator.clipboard.writeText(url);
+        toast('Новая ссылка скопирована. Старая больше не работает.');
+      } catch (e) {
+        window.prompt('Новая ссылка:', url);
+      }
+    } catch (e) {
+      toast('Не получилось выпустить новую ссылку. Попробуй позже.');
     }
   }
 
@@ -1315,7 +1363,7 @@
       renderInterview(t, +m[2], +m[3]);
       window.scrollTo(0, 0);
     } else if (hash === '#/offer') {
-      if (!document.querySelector('.offer__buy')) { track('offer_view'); save(); }
+      if (!document.querySelector('.offer__buy')) track('offer_view');
       document.title = TITLES.offer;
       renderOffer();
       window.scrollTo(0, 0);
@@ -1325,6 +1373,7 @@
       renderCheckout();
     } else if (hash === '#/book' || hash === '#/example') {
       document.title = hash === '#/book' ? TITLES.book : TITLES.example;
+      if (hash === '#/example') track('example_view');
       renderBook(hash === '#/example');
       window.scrollTo(0, 0);
     } else if (hash === '#/' || !hash.startsWith('#/')) {
@@ -1346,6 +1395,7 @@
     }
     window.addEventListener('hashchange', route);
     route();
+    trackVisit();
   }
 
   start();
