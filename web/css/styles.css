@@ -751,3 +751,31 @@ kbd { font: 12px var(--sans); padding: 1px 6px; border-radius: 6px; border: 1px 
 .pdf-root .bk-photo { margin: 4px 0 18px; }
 .pdf-root .bk-photo img { max-height: 230px; object-fit: cover; }
 .pdf-root .bk-photo figcaption { font-size: 20px; padding-top: 6px; }
+
+/* ---------- Полная версия: метка и экран после оплаты ---------- */
+.badge-full {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px 0 8px; border-radius: 999px;
+  background: #e6f6ee; color: #1f6f49; font: 600 12px var(--sans); white-space: nowrap; vertical-align: middle;
+}
+.badge-full svg { width: 16px; height: 16px; padding: 3px; border-radius: 50%; background: #2f9e6a; color: #fff; }
+.reader__label .badge-full { margin-right: 10px; }
+.offer__bar .badge-full { margin-left: auto; }
+
+.paid { max-width: 720px; }
+.paid__icon { display: grid; place-items: center; width: 56px; height: 56px; margin-bottom: 18px; border-radius: 50%; background: #2f9e6a; color: #fff; box-shadow: 0 0 0 8px #e6f6ee; }
+.paid__icon svg { width: 26px; height: 26px; }
+.paid h1 { margin-bottom: 14px; }
+.paid__list { list-style: none; margin: 24px 0 28px; padding: 0; display: flex; flex-direction: column; gap: 12px; font-size: 16px; color: var(--ink-2); }
+.paid__list li { display: flex; align-items: flex-start; gap: 12px; }
+.paid__list li > svg { flex: none; width: 24px; height: 24px; padding: 6px; margin-top: 1px; border-radius: 50%; background: #e6f6ee; color: #2f9e6a; }
+.paid__list strong { color: var(--ink); font-weight: 600; }
+.paid__actions { display: flex; gap: 12px; flex-wrap: wrap; }
+.paid__note { margin-top: 18px; font-size: 14px; color: var(--muted); }
+
+@media (max-width: 600px) {
+  .studio__bar .badge-full span { display: none; }
+  .studio__bar .badge-full { padding: 0 6px; }
+  .reader__label .badge-full span { display: none; }
+  .reader__label .badge-full { padding: 0 6px; margin-right: 6px; }
+  .paid__actions .btn { width: 100%; }
+}

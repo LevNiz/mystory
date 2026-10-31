@@ -12,7 +12,7 @@
   const emptyData = () => ({
     profile: { name: '', gender: 'm', email: '', born: '', city: '' },
     answers: {},
-    book: { title: '', dedication: '', style: 'answers', aiSig: {} },
+    book: { title: '', dedication: '', style: 'answers', aiSig: {}, paidSeen: false },
     last: null,
     events: [],
   });
@@ -169,6 +169,7 @@
     link: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>',
   };
 
+  const fullBadge = () => (server.paid ? `<span class="badge-full" title="Полная версия открыта">${icon.check}<span>Полная версия</span></span>` : '');
   const logo = () => `<a class="logo" href="#/"><span class="logo__mark">${icon.book}</span><span>Книга моей жизни</span></a>`;
 
   // Мягкое цветное пятно — визуальный «характер» главы вместо фотографий.
@@ -232,7 +233,7 @@
     <section class="hero">
       ${aura(24, 'aura--hero-a')}${aura(265, 'aura--hero-b')}${aura(165, 'aura--hero-c')}
       <div class="hero__copy">
-        <p class="pill">${icon.spark} ${PROMO ? `Промокод ${esc(PROMO.code)}: −${PROMO.percent}% на полную книгу` : '12 вопросов — бесплатно'}</p>
+        <p class="pill">${icon.spark} ${server.paid ? 'Полная версия открыта' : PROMO ? `Промокод ${esc(PROMO.code)}: −${PROMO.percent}% на полную книгу` : '12 вопросов — бесплатно'}</p>
         <h1>Интервью <em>с самим собой</em></h1>
         <p class="hero__sub">Твоя автобиография за один час</p>
         <p class="hero__text">Ответь на несколько вопросов — голосом или текстом — и мы соберём полноценную автобиографию всей твоей жизни.</p>
@@ -320,7 +321,7 @@
         </article>
         <article class="plan plan--main">
           ${aura(24, 'aura--plan')}
-          <h3 class="plan__name">Полная книга моей жизни <span class="tag">единоразово</span></h3>
+          <h3 class="plan__name">Полная книга моей жизни <span class="tag">${server.paid ? 'уже твоя' : 'единоразово'}</span></h3>
           <p class="plan__price">${priceHtml()}<span>без подписки</span></p>
           ${promoNote()}
           <ul class="checks">
@@ -368,6 +369,7 @@
   // ---------- Предложение полной версии ----------
 
   function renderOffer() {
+    if (server.paid) return renderPaidDone(false);
     app.innerHTML = `
     <div class="offer">
       ${aura(24, 'aura--offer-a')}${aura(265, 'aura--offer-b')}
@@ -490,18 +492,43 @@
     tick();
   }
 
-  function renderPaidDone() {
+  // Экран полной версии: сразу после оплаты (first) или когда оплативший снова открывает предложение.
+  function renderPaidDone(first = true) {
+    if (!state.book.paidSeen) {
+      state.book.paidSeen = true;
+      track('paid_seen');
+      save();
+    }
+    const done = answered('full'), all = total('full');
+    const [ci] = resumeStep('full');
+    const started = done > 0;
     app.innerHTML = `
     <div class="offer">
-      ${aura(160, 'aura--offer-a')}
-      <header class="offer__bar">${logo()}</header>
-      <main class="offer__card offer__card--center">
-        <p class="lost__code">Готово</p>
-        <h1>Оплата прошла — спасибо!</h1>
-        <p class="offer__text">Полная книга открыта. Твои ответы бесплатной части уже в ней.</p>
-        <a class="btn btn--dark btn--lg" href="#/full">Продолжить книгу ${icon.arrow}</a>
+      ${aura(160, 'aura--offer-a')}${aura(24, 'aura--offer-b')}
+      <header class="offer__bar">${logo()}${fullBadge()}</header>
+      <main class="offer__card paid">
+        <span class="paid__icon" aria-hidden="true">${icon.check}</span>
+        <p class="eyebrow">${first ? 'Оплата прошла' : 'Полная версия'}</p>
+        <h1>${first ? 'Полная книга открыта — спасибо!' : 'Полная книга уже твоя'}</h1>
+        <p class="offer__text">Доступ навсегда, без подписки. Твои ответы бесплатной части уже перенесены в книгу.</p>
+        <ul class="paid__list">
+          <li>${icon.check}<span><strong>${fullSize()}</strong> — от корней и семьи до того, что останется после тебя</span></li>
+          <li>${icon.check}<span><strong>Литературный текст</strong> каждой главы и уточняющие вопросы</span></li>
+          <li>${icon.check}<span><strong>Фотографии</strong> с подписями в главах</span></li>
+          <li>${icon.check}<span><strong>Название и посвящение</strong> книги</span></li>
+          <li>${icon.check}<span><strong>PDF для печати</strong> — в любой момент на странице книги</span></li>
+        </ul>
+        <div class="paid__actions">
+          ${done === all ? `
+          <button type="button" class="btn btn--dark btn--lg" data-go="#/book">${icon.book} Открыть книгу ${icon.arrow}</button>
+          <button type="button" class="btn btn--ghost btn--lg" data-go="#/full">Вернуться к вопросам</button>` : `
+          <button type="button" class="btn btn--dark btn--lg" data-go="#/full">${started ? `Продолжить интервью · ${esc(g(TRACKS.full[ci].title))}` : 'Начать полное интервью'} ${icon.arrow}</button>
+          <button type="button" class="btn btn--ghost btn--lg" data-go="#/book">${icon.book} Открыть книгу</button>`}
+        </div>
+        <p class="paid__note">${done === all ? 'Все вопросы отвечены — книгу можно собрать в PDF.' : started ? `Отвечено ${done} из ${all} — продолжай в своём темпе, прогресс сохраняется.` : 'Отвечай в своём темпе — любой вопрос можно пропустить и вернуться позже.'}</p>
       </main>
     </div>`;
+    app.querySelectorAll('[data-go]').forEach((b) => b.addEventListener('click', () => go(b.dataset.go)));
   }
 
   // ---------- Интервью ----------
@@ -554,6 +581,7 @@
     <div class="studio">
       <header class="studio__bar">
         ${logo()}
+        ${fullBadge()}
         <div class="studio__progress">
           <span>${t === 'full' ? 'Полная книга' : 'Моя история'} · ${done} из ${all} ${answersWord(done)}</span>
           <div class="bar"><span style="width:${pct}%"></span></div>
@@ -933,7 +961,7 @@
     <div class="reader">
       <header class="reader__bar">
         <a class="btn btn--ghost btn--sm" href="${isExample ? '#/' : '#/interview'}">${icon.back}<span class="hide-sm">${isExample ? 'На главную' : 'К вопросам'}</span></a>
-        <span class="reader__label">${isExample ? 'Пример: бесплатная версия' : `${full ? 'Полная книга' : 'Моя история'} · ${done} из ${all}`}</span>
+        <span class="reader__label">${isExample ? 'Пример: бесплатная версия' : `${fullBadge()}${full ? 'Полная книга' : 'Моя история'} · ${done} из ${all}`}</span>
         <div class="reader__actions">
           ${isExample ? `<a class="btn btn--dark btn--sm" href="#/free">Создать свою ${icon.arrow}</a>` : `
             <button class="btn btn--ghost btn--sm" id="edit">${editing ? `${icon.check}<span>Готово</span>` : `${icon.pen}<span class="hide-sm">Редактировать</span>`}</button>
@@ -1215,6 +1243,14 @@
     const m = hash.match(/^#\/(free|full)(?:\/(\d+)\/(\d+))?$/);
     if (hash !== '#/book') editing = false;
 
+    // Оплата могла подтвердиться в фоне (человек ушёл платить в приложение банка) —
+    // показываем подтверждение один раз, на какой бы странице он ни вернулся.
+    if (server.paid && !state.book.paidSeen && !['#/checkout', '#/paid', '#/example'].includes(hash)) {
+      document.title = 'Полная книга открыта — Книга моей жизни';
+      renderPaidDone(true);
+      window.scrollTo(0, 0);
+      return;
+    }
     if (hash === '#/interview') return go(`#/${currentTrack()}`);
     if (m) {
       const t = m[1];
