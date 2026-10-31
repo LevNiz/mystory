@@ -38,6 +38,8 @@ from .urlpay import UrlPay, verdict
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("mystory")
+# httpx пишет полный URL запроса, а в URL Telegram — токен бота.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 settings = load_settings()
 db = Database(settings.db_path)
