@@ -315,8 +315,9 @@ button { font: inherit; cursor: pointer; color: inherit; }
 .follow__text { font-size: 15px; }
 @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
 
-.photo-preview { margin: 18px 0 0; display: flex; align-items: center; gap: 16px; }
-.photo-preview img { width: 96px; height: 72px; object-fit: cover; border-radius: 10px; box-shadow: var(--shadow); }
+.photo-preview { margin: 12px 0 0; display: flex; align-items: center; gap: 16px; }
+.photo-preview__img { flex: none; display: grid; place-items: center; width: 104px; height: 80px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); overflow: hidden; }
+.photo-preview img { display: block; max-width: 104px; max-height: 80px; width: auto; height: auto; }
 .photo-preview figcaption { flex: 1; display: flex; gap: 12px; align-items: center; min-width: 0; }
 .photo-preview input { flex: 1; min-width: 0; border: 0; border-bottom: 1px solid var(--line); background: transparent; font: 24px var(--hand); padding: 4px 0; outline: none; }
 .photo-preview input:focus { border-color: var(--accent); }
@@ -383,7 +384,9 @@ kbd { font: 12px var(--sans); padding: 1px 6px; border-radius: 6px; border: 1px 
 .bk-sub { clear: both; font: italic 500 18px/1.4 var(--serif); letter-spacing: 0; color: var(--ink-2); margin: 30px 0 10px; }
 .bk-drop::first-letter { float: left; font-size: 62px; line-height: .85; padding: 6px 8px 0 0; color: var(--accent); }
 .bk-photo { margin: 6px 0 28px; }
-.bk-photo img { width: 100%; max-height: 400px; object-fit: cover; border-radius: 4px; }
+/* Без object-fit: html2canvas (PDF) его не поддерживает и сплющивает фото. Пропорции держим через auto-размеры. */
+.bk-photo { text-align: center; }
+.bk-photo img { display: block; width: auto; height: auto; max-width: 100%; max-height: 460px; margin: 0 auto; border-radius: 4px; }
 .bk-photo figcaption { font: 24px/1.2 var(--hand); color: var(--ink-2); padding: 10px 2px 0; }
 .bk-empty { text-align: center; display: flex; flex-direction: column; align-items: center; gap: 22px; font: 20px var(--serif); color: var(--ink-2); }
 
@@ -749,7 +752,7 @@ kbd { font: 12px var(--sans); padding: 1px 6px; border-radius: 6px; border: 1px 
 .pdf-root .bk-toc li { padding: 6px 0; font-size: 16px; gap: 12px; }
 .pdf-root .bk-toc li span { width: 58px; font-size: 10px; }
 .pdf-root .bk-photo { margin: 4px 0 18px; }
-.pdf-root .bk-photo img { max-height: 230px; object-fit: cover; }
+.pdf-root .bk-photo img { max-height: 260px; }
 .pdf-root .bk-photo figcaption { font-size: 20px; padding-top: 6px; }
 
 /* ---------- Полная версия: метка и экран после оплаты ---------- */
@@ -783,3 +786,19 @@ kbd { font: 12px var(--sans); padding: 1px 6px; border-radius: 6px; border: 1px 
 /* Первый экран: мятное пятно слева тише, больше воздуха перед блоком статистики */
 .aura--hero-c { opacity: .3; bottom: -220px; }
 .stats { margin-top: clamp(24px, 4vw, 56px); }
+
+/* Выбор обращения вверху вопроса, пока не выбран */
+.gender-ask { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 0 0 22px; padding: 12px 14px 12px 16px; border-radius: var(--r-sm); background: var(--accent-soft); font-size: 15px; font-weight: 500; }
+.gender-ask .seg button { height: 36px; padding: 0 18px; }
+
+/* Несколько фото к главе */
+.photos { margin-top: 20px; padding-top: 16px; border-top: 1px dashed var(--line); }
+.photos__title { font-size: 13px; color: var(--muted); }
+.bk-photo figcaption { text-align: left; }
+@media (max-width: 600px) {
+  .photo-preview { gap: 12px; }
+  .photo-preview__img { width: 84px; height: 66px; }
+  .photo-preview img { max-width: 84px; max-height: 66px; }
+  .photo-preview input { font-size: 19px; }
+  .photo-preview figcaption { gap: 8px; }
+}

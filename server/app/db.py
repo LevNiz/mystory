@@ -31,6 +31,17 @@ CREATE TABLE IF NOT EXISTS photos (
     updated_at  INTEGER NOT NULL,
     PRIMARY KEY (book_id, chapter_id)
 );
+CREATE TABLE IF NOT EXISTS chapter_photos (
+    book_id     TEXT NOT NULL,
+    id          TEXT NOT NULL,
+    chapter_id  TEXT NOT NULL,
+    src         TEXT NOT NULL,
+    caption     TEXT NOT NULL DEFAULT '',
+    position    INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    PRIMARY KEY (book_id, id)
+);
+CREATE INDEX IF NOT EXISTS chapter_photos_chapter ON chapter_photos (book_id, chapter_id, position);
 CREATE TABLE IF NOT EXISTS payments (
     uuid        TEXT PRIMARY KEY,
     book_id     TEXT NOT NULL,
@@ -72,6 +83,12 @@ class Database:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(SCHEMA)
+            # Фото из старой схемы (одно на главу) переносим в новую, где их может быть несколько.
+            if not self._conn.execute("SELECT 1 FROM chapter_photos LIMIT 1").fetchone():
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO chapter_photos (book_id, id, chapter_id, src, caption, position, updated_at) "
+                    "SELECT book_id, chapter_id || '-1', chapter_id, src, caption, 1, updated_at FROM photos"
+                )
             # Колонки, добавленные после первого запуска.
             for column in ("email TEXT", "pay_url TEXT", "qr_link TEXT", "promo TEXT", "base_amount TEXT"):
                 try:
@@ -120,27 +137,41 @@ class Database:
 
     # --- Фото ---
 
-    def photos(self, book_id: str) -> dict[str, dict[str, str]]:
-        rows = self._q("SELECT chapter_id, src, caption FROM photos WHERE book_id = ?", (book_id,))
-        return {r["chapter_id"]: {"src": r["src"], "caption": r["caption"]} for r in rows}
+    def photos(self, book_id: str) -> dict[str, list[dict[str, str]]]:
+        """Фото книги по главам, в порядке добавления."""
+        rows = self._q(
+            "SELECT id, chapter_id, src, caption FROM chapter_photos WHERE book_id = ? ORDER BY chapter_id, position",
+            (book_id,),
+        )
+        result: dict[str, list[dict[str, str]]] = {}
+        for r in rows:
+            result.setdefault(r["chapter_id"], []).append({"id": r["id"], "src": r["src"], "caption": r["caption"]})
+        return result
 
-    def put_photo(self, book_id: str, chapter_id: str, src: str | None, caption: str) -> None:
+    def photo_count(self, book_id: str, chapter_id: str) -> int:
+        row = self._q("SELECT COUNT(*) AS n FROM chapter_photos WHERE book_id = ? AND chapter_id = ?", (book_id, chapter_id))
+        return int(row[0]["n"])
+
+    def add_photo(self, book_id: str, chapter_id: str, photo_id: str, src: str, caption: str) -> None:
         now = int(time.time())
-        if src is None:
-            self._q(
-                "UPDATE photos SET caption = ?, updated_at = ? WHERE book_id = ? AND chapter_id = ?",
-                (caption, now, book_id, chapter_id),
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(position), 0) + 1 FROM chapter_photos WHERE book_id = ? AND chapter_id = ?",
+                (book_id, chapter_id),
+            ).fetchone()
+            self._conn.execute(
+                "INSERT INTO chapter_photos (book_id, id, chapter_id, src, caption, position, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (book_id, photo_id, chapter_id, src, caption, row[0], now),
             )
-            return
+
+    def set_photo_caption(self, book_id: str, photo_id: str, caption: str) -> None:
         self._q(
-            "INSERT INTO photos (book_id, chapter_id, src, caption, updated_at) VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT (book_id, chapter_id) DO UPDATE SET src = excluded.src, "
-            "caption = excluded.caption, updated_at = excluded.updated_at",
-            (book_id, chapter_id, src, caption, now),
+            "UPDATE chapter_photos SET caption = ?, updated_at = ? WHERE book_id = ? AND id = ?",
+            (caption, int(time.time()), book_id, photo_id),
         )
 
-    def delete_photo(self, book_id: str, chapter_id: str) -> None:
-        self._q("DELETE FROM photos WHERE book_id = ? AND chapter_id = ?", (book_id, chapter_id))
+    def delete_photo(self, book_id: str, photo_id: str) -> None:
+        self._q("DELETE FROM chapter_photos WHERE book_id = ? AND id = ?", (book_id, photo_id))
 
     # --- Платежи ---
 

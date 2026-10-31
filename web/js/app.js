@@ -202,6 +202,7 @@
   }
 
   const freeDone = () => answered('free') === total('free');
+  const MAX_PHOTOS = 6;
 
   // Сколько глав и вопросов в полной книге — считаем из данных, чтобы тексты не расходились с вопросами.
   const FULL_CHAPTERS = TRACKS.full.length;
@@ -576,7 +577,7 @@
     const pct = Math.round((done / all) * 100);
     const n = stepIndex(t, ci, qi) + 1;
     const answer = state.answers[q.id] || { text: '' };
-    const photo = server.photos[chapter.id];
+    const photos = server.photos[chapter.id] || [];
     const isLast = n === all;
     const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -621,6 +622,14 @@
             </div>
             <div class="dots">${chapter.questions.map((qq, i) => `<a href="#/${t}/${ci}/${i}" class="${i === qi ? 'is-on' : ''} ${isAnswered(qq) ? 'is-done' : ''}" aria-label="Вопрос ${i + 1}"></a>`).join('')}</div>
 
+            ${q.type !== 'intro' && !genderChosen() ? `
+            <div class="gender-ask" role="group" aria-label="Обращение">
+              <span>Как к тебе обращаться в вопросах и книге?</span>
+              <div class="seg">
+                <button type="button" data-gender="m">Он</button>
+                <button type="button" data-gender="f">Она</button>
+              </div>
+            </div>` : ''}
             <h1 class="q-title">${esc(g(q.title))}</h1>
 
             ${q.type === 'intro' ? introFields() : ''}
@@ -629,15 +638,20 @@
               <textarea id="answer" rows="6" placeholder="${q.type === 'intro' ? 'Как ты обычно представляешься? Например: «Я Серёжа, инженер и папа двоих детей»' : 'Начни писать или нажми на микрофон…'}">${esc(answer.text)}</textarea>
               <div class="answer__tools">
                 ${SpeechRec ? `<button type="button" class="mic" id="mic">${icon.mic}<span>Ответить голосом</span></button>` : '<span class="hint">Голосовой ввод работает в Chrome и Safari</span>'}
-                ${t === 'full' ? `<label class="photo-add" title="Фото к главе">${icon.photo}<span>${photo ? 'Заменить фото' : 'Фото к главе'}</span><input type="file" id="photo" accept="image/*" hidden></label>` : ''}
+                ${t === 'full' && photos.length < MAX_PHOTOS ? `<label class="photo-add" title="Фото к главе">${icon.photo}<span>${photos.length ? 'Ещё фото' : 'Фото к главе'}</span><input type="file" id="photo" accept="image/*" multiple hidden></label>` : ''}
               </div>
             </div>
             <div class="follow" id="follow" hidden aria-live="polite"></div>
 
-            ${t === 'full' && photo ? `
-              <figure class="photo-preview"><img src="${photo.src}" alt="">
-                <figcaption><input id="caption" value="${esc(photo.caption)}" placeholder="Подпись к фото" aria-label="Подпись к фото"><button type="button" class="link" id="photo-remove">Убрать</button></figcaption>
-              </figure>` : ''}
+            ${t === 'full' && photos.length ? `
+              <div class="photos">
+                <p class="photos__title">Фото к главе «${esc(g(chapter.title))}» · ${photos.length} из ${MAX_PHOTOS}</p>
+                ${photos.map((ph) => `
+                <figure class="photo-preview" data-photo="${esc(ph.id)}">
+                  <span class="photo-preview__img"><img src="${ph.src}" alt=""></span>
+                  <figcaption><input data-caption="${esc(ph.id)}" value="${esc(ph.caption)}" placeholder="Подпись к фото" aria-label="Подпись к фото"><button type="button" class="link" data-remove="${esc(ph.id)}">Убрать</button></figcaption>
+                </figure>`).join('')}
+              </div>` : ''}
 
             <div class="card__nav">
               ${n > 1 ? `<a class="btn btn--ghost" href="#/${t}/${prevStep(t, ci, qi).join('/')}">${icon.back}<span class="hide-sm">Назад</span></a>` : '<span></span>'}
@@ -654,6 +668,9 @@
 
     bindInterview(t, chapter, q, SpeechRec);
   }
+
+  // Обращение выбрано явно (или уже стоит «она» из старой версии, где флага не было).
+  const genderChosen = () => Boolean(state.profile.genderSet || state.profile.gender === 'f');
 
   function introFields() {
     const p = state.profile;
@@ -708,6 +725,7 @@
     }
     app.querySelectorAll('[data-gender]').forEach((b) => b.addEventListener('click', () => {
       state.profile.gender = b.dataset.gender;
+      state.profile.genderSet = true;
       save();
       route();
     }));
@@ -819,38 +837,41 @@
       });
     }
 
-    // Фото главы (полная книга) — хранится на сервере.
+    // Фото главы (полная книга): их может быть несколько, хранятся на сервере.
     const file = document.getElementById('photo');
     if (file) file.addEventListener('change', async () => {
-      const f = file.files[0];
-      if (!f) return;
-      try {
-        const prev = server.photos[chapter.id];
-        const src = await compressImage(f, 1400, 0.8);
-        const caption = prev ? prev.caption : '';
-        await flush();
-        await api('PUT', `/api/photo/${chapter.id}`, { src, caption });
-        server.photos[chapter.id] = { src, caption };
-        route();
-      } catch (e) {
-        toast(e.status === 413 ? 'Фото слишком большое.' : 'Не получилось загрузить фото.');
+      const list = server.photos[chapter.id] || (server.photos[chapter.id] = []);
+      const files = [...file.files].slice(0, MAX_PHOTOS - list.length);
+      if (!files.length) return;
+      await flush();
+      for (const f of files) {
+        try {
+          const src = await compressImage(f, 1600, 0.82);
+          const { id } = await api('POST', `/api/photo/${chapter.id}`, { src, caption: '' });
+          list.push({ id, src, caption: '' });
+        } catch (e) {
+          toast(e.status === 413 ? 'Фото слишком большое.' : e.message === 'too_many_photos' ? `В главе не больше ${MAX_PHOTOS} фото.` : 'Не получилось загрузить фото.');
+          break;
+        }
       }
+      route();
     });
-    const cap = document.getElementById('caption');
-    let capTimer;
-    if (cap) cap.addEventListener('input', () => {
-      server.photos[chapter.id].caption = cap.value;
-      clearTimeout(capTimer);
-      capTimer = setTimeout(() => api('PUT', `/api/photo/${chapter.id}`, { src: null, caption: cap.value }).then(flashSaved).catch(() => toast('Не удалось сохранить подпись.')), 700);
-    });
-    const rm = document.getElementById('photo-remove');
-    if (rm) rm.addEventListener('click', async () => {
+    const capTimers = {};
+    app.querySelectorAll('[data-caption]').forEach((input) => input.addEventListener('input', () => {
+      const id = input.dataset.caption;
+      const ph = (server.photos[chapter.id] || []).find((x) => x.id === id);
+      if (ph) ph.caption = input.value;
+      clearTimeout(capTimers[id]);
+      capTimers[id] = setTimeout(() => api('PUT', `/api/photo/${chapter.id}/${id}`, { caption: input.value }).then(flashSaved).catch(() => toast('Не удалось сохранить подпись.')), 700);
+    }));
+    app.querySelectorAll('[data-remove]').forEach((btn) => btn.addEventListener('click', async () => {
+      const id = btn.dataset.remove;
       try {
-        await api('DELETE', `/api/photo/${chapter.id}`);
-        delete server.photos[chapter.id];
+        await api('DELETE', `/api/photo/${chapter.id}/${id}`);
+        server.photos[chapter.id] = (server.photos[chapter.id] || []).filter((x) => x.id !== id);
         route();
       } catch (e) { toast('Не удалось убрать фото.'); }
-    });
+    }));
   }
 
   function compressImage(file, maxSide, quality) {
@@ -883,7 +904,7 @@
       c,
       key: `full:${c.id}`,
       items: items([...freeQs.filter((q) => q.into === c.id), ...(c.questions || [])]),
-      photo: photos[c.id],
+      photos: photos[c.id] || [],
     }));
   }
 
@@ -901,20 +922,41 @@
     const dedication = full ? s.book.dedication.trim() : '';
     const chapters = bookChapters(s, full, opts.photos)
       .map((x) => ({ ...x, all: x.items, items: x.items.filter((it) => !it.a.excluded) }))
-      .filter((x) => x.items.length || x.photo);
+      .filter((x) => x.items.length || (x.photos && x.photos.length));
 
-    const PHOTO_MARK = '[ФОТО]';
-    const figure = (x) => (x.photo ? `<figure class="bk-photo"><img src="${x.photo.src}" alt="${esc(x.photo.caption || '')}">${x.photo.caption ? `<figcaption>${esc(x.photo.caption)}</figcaption>` : ''}</figure>` : '');
-    // Фото встаёт туда, где ИИ поставил метку [ФОТО]; без метки — после первого абзаца или истории.
+    const MARK = /^\[ФОТО(?:\s*(\d+))?\]$/;
+    const figure = (ph) => `<figure class="bk-photo"><img src="${ph.src}" alt="${esc(ph.caption || '')}">${ph.caption ? `<figcaption>${esc(ph.caption)}</figcaption>` : ''}</figure>`;
+    // Раскладываем фото по блокам текста: на места меток [ФОТО n], остальные — равномерно.
+    const withPhotos = (blocks, photos) => {
+      const used = new Set();
+      const out = blocks.map((b) => {
+        const m = b.mark ? b.text.match(MARK) : null;
+        if (!m) return b.html;
+        const n = Number(m[1] || 1);
+        if (!photos[n - 1] || used.has(n)) return '';
+        used.add(n);
+        return figure(photos[n - 1]);
+      });
+      const textCount = blocks.filter((b) => !b.mark).length;
+      const rest = photos.map((ph, i) => ({ ph, n: i + 1 })).filter((x) => !used.has(x.n));
+      rest.forEach((x, k) => {
+        let seen = 0;
+        const target = Math.max(1, Math.round((textCount * (k + 1)) / (rest.length + 1)));
+        const at = blocks.findIndex((b) => !b.mark && ++seen === target);
+        out.splice(at < 0 ? out.length : at + 1 + k, 0, figure(x.ph));
+      });
+      return out.join('');
+    };
     const body = (x) => {
+      const photos = x.photos || [];
       const ai = literary && aiTexts[x.key];
       if (ai && ai.text) {
         const stale = !ai.edited && (s.book.aiSig || {})[x.key] && s.book.aiSig[x.key] !== chapterSig(x, s);
-        const parts = paragraphs(ai.text);
-        if (x.photo && !parts.includes(PHOTO_MARK)) parts.splice(Math.min(1, parts.length), 0, PHOTO_MARK);
-        return `${stale && opts.screen ? '<p class="bk-stale">Ответы в этой главе изменились — текст можно обновить в редакторе.</p>' : ''}${parts.map((p) => (p === PHOTO_MARK ? figure(x) : `<p>${esc(p)}</p>`)).join('')}`;
+        const blocks = paragraphs(ai.text).map((p) => (MARK.test(p) ? { mark: true, text: p } : { html: `<p>${esc(p)}</p>` }));
+        return `${stale && opts.screen ? '<p class="bk-stale">Ответы в этой главе изменились — текст можно обновить в редакторе.</p>' : ''}${withPhotos(blocks, photos)}`;
       }
-      return x.items.map((it, i) => `<h3 class="bk-sub">${esc(g(it.q.title, s))}</h3>${paragraphs(it.a.text).filter((p) => p !== PHOTO_MARK).map((p) => `<p>${esc(p)}</p>`).join('')}${i === 0 ? figure(x) : ''}`).join('') || figure(x);
+      const blocks = x.items.map((it) => ({ html: `<h3 class="bk-sub">${esc(g(it.q.title, s))}</h3>${paragraphs(it.a.text).filter((p) => !MARK.test(p)).map((p) => `<p>${esc(p)}</p>`).join('')}` }));
+      return withPhotos(blocks, photos);
     };
 
     return {
@@ -973,7 +1015,7 @@
       </header>
       <div class="reader__body">
         <aside class="reader__toc">
-          ${chapters.map((x) => `<a href="#ch-${x.c.id}" data-jump="ch-${x.c.id}"><span class="reader__thumb" style="--h:${x.c.hue}">${x.photo ? `<img src="${x.photo.src}" alt="">` : ''}</span>${esc(g(x.c.title, s))}</a>`).join('')}
+          ${chapters.map((x) => `<a href="#ch-${x.c.id}" data-jump="ch-${x.c.id}"><span class="reader__thumb" style="--h:${x.c.hue}">${x.photos && x.photos.length ? `<img src="${x.photos[0].src}" alt="">` : ''}</span>${esc(g(x.c.title, s))}</a>`).join('')}
         </aside>
         <div class="reader__main">
           ${!isExample && !editing && done < all ? `
@@ -1136,7 +1178,7 @@
             </div>`).join('')}
         </section>`;
       }).join('')}
-      <p class="editor__hint">Правки сохраняются сразу. Выключенные истории останутся в твоих ответах, но не попадут в книгу${literary ? ' — после правок пересобери текст главы. Строка [ФОТО] — место фотографии в главе, её можно перенести' : ''}.</p>
+      <p class="editor__hint">Правки сохраняются сразу. Выключенные истории останутся в твоих ответах, но не попадут в книгу${literary ? ' — после правок пересобери текст главы. Строки [ФОТО 1], [ФОТО 2]… — места фотографий в главе, их можно переносить' : ''}.</p>
     </div>`;
   }
 
@@ -1201,6 +1243,14 @@
     holder.replaceChildren(...parts);
     document.body.appendChild(holder);
 
+    // Причины «пустого» PDF: прокрутка страницы, недогруженные картинки и лимит размера холста
+    // (Safari на iPhone — около 16,7 млн пикселей). Всё это устраняем до отрисовки.
+    const scroll = [window.scrollX, window.scrollY];
+    window.scrollTo(0, 0);
+    await Promise.all([...holder.querySelectorAll('img')].map((img) => (img.decode ? img.decode().catch(() => {}) : Promise.resolve())));
+    const tallest = Math.max(...parts.map((part) => part.scrollHeight), 1);
+    const scale = Math.max(1, Math.min(2, Math.sqrt(14e6 / (446 * tallest)) * 0.95));
+
     const base = state.book.title.trim() || defaultTitle(full);
     const fileName = `${base.replace(/[\\/:*?"<>|]/g, '')}${state.profile.name.trim() ? ` — ${state.profile.name.trim()}` : ''}.pdf`;
     const progress = (n) => { btn.textContent = `Собираем… ${Math.round((n / parts.length) * 100)}%`; };
@@ -1209,7 +1259,7 @@
         margin: [16, 15, 18, 15],
         filename: fileName,
         image: { type: 'jpeg', quality: 0.9 },
-        html2canvas: { scale: 2, useCORS: true, backgroundColor: '#fffdf9' },
+        html2canvas: { scale, useCORS: true, backgroundColor: '#fffdf9', scrollX: 0, scrollY: 0 },
         jsPDF: { unit: 'mm', format: 'a5', orientation: 'portrait' },
         pagebreak: { mode: ['css', 'legacy'], avoid: ['.bk-photo', '.bk-sub', 'p'] },
       }).from(parts[0]).toPdf();
@@ -1222,6 +1272,7 @@
       window.print();
     } finally {
       holder.remove();
+      window.scrollTo(scroll[0], scroll[1]);
       btn.disabled = false;
       btn.innerHTML = label;
     }

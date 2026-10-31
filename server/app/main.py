@@ -267,29 +267,47 @@ async def put_state(request: Request) -> Response:
     return response
 
 
-@app.put("/api/photo/{chapter_id}")
-async def put_photo(chapter_id: str, request: Request) -> dict[str, bool]:
+MAX_PHOTOS_PER_CHAPTER = 6
+PHOTO_ID = re.compile(r"^[a-z]{2,12}-[A-Za-z0-9_-]{1,24}$")
+
+
+@app.post("/api/photo/{chapter_id}")
+async def add_photo(chapter_id: str, request: Request) -> dict[str, str]:
+    """Новое фото в главу (их может быть несколько)."""
     book = require_book(request)
     if not book["paid"]:
         raise HTTPException(status_code=402, detail="paid_only")
     if chapter_id not in content.full_chapters:
         raise HTTPException(status_code=404, detail="unknown_chapter")
     body = await read_json(request)
-    caption = str(body.get("caption") or "")[:200]
     src = body.get("src")
-    if src is not None:
-        if not isinstance(src, str) or not re.match(r"^data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$", src):
-            raise HTTPException(status_code=400, detail="bad_image")
-        if len(src) > MAX_PHOTO_BYTES:
-            raise HTTPException(status_code=413, detail="too_large")
-    await asyncio.to_thread(db.put_photo, book["id"], chapter_id, src, caption)
+    if not isinstance(src, str) or not re.match(r"^data:image/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$", src):
+        raise HTTPException(status_code=400, detail="bad_image")
+    if len(src) > MAX_PHOTO_BYTES:
+        raise HTTPException(status_code=413, detail="too_large")
+    if await asyncio.to_thread(db.photo_count, book["id"], chapter_id) >= MAX_PHOTOS_PER_CHAPTER:
+        raise HTTPException(status_code=409, detail="too_many_photos")
+    photo_id = f"{chapter_id}-{secrets.token_urlsafe(6)}"
+    await asyncio.to_thread(db.add_photo, book["id"], chapter_id, photo_id, src, str(body.get("caption") or "")[:200])
+    return {"id": photo_id}
+
+
+@app.put("/api/photo/{chapter_id}/{photo_id}")
+async def edit_photo(chapter_id: str, photo_id: str, request: Request) -> dict[str, bool]:
+    book = require_book(request)
+    if not PHOTO_ID.match(photo_id):
+        raise HTTPException(status_code=400, detail="bad_photo")
+    body = await read_json(request)
+    await asyncio.to_thread(db.set_photo_caption, book["id"], photo_id, str(body.get("caption") or "")[:200])
     return {"ok": True}
 
 
-@app.delete("/api/photo/{chapter_id}")
-async def delete_photo(chapter_id: str, request: Request) -> dict[str, bool]:
+@app.delete("/api/photo/{chapter_id}/{photo_id}")
+async def delete_photo(chapter_id: str, photo_id: str, request: Request) -> dict[str, bool]:
     book = require_book(request)
-    await asyncio.to_thread(db.delete_photo, book["id"], chapter_id[:20])
+    if not PHOTO_ID.match(photo_id):
+        raise HTTPException(status_code=400, detail="bad_photo")
+    await asyncio.to_thread(db.delete_photo, book["id"], photo_id)
     return {"ok": True}
 
 
@@ -374,9 +392,9 @@ async def ai_chapter(request: Request) -> dict[str, Any]:
     if not pairs:
         raise HTTPException(status_code=400, detail="no_answers")
     portrait = author_portrait(book)
-    photo = (await asyncio.to_thread(db.photos, book["id"])).get(chapter_id) if edition == "full" else None
-    caption = (photo["caption"] or "фотография к главе") if photo else None
-    source = hashlib.sha256(json.dumps([pairs, gender, portrait, caption], ensure_ascii=False).encode()).hexdigest()[:16]
+    photos = (await asyncio.to_thread(db.photos, book["id"])).get(chapter_id, []) if edition == "full" else []
+    captions = [p["caption"] or "фотография к главе" for p in photos]
+    source = hashlib.sha256(json.dumps([pairs, gender, portrait, captions], ensure_ascii=False).encode()).hexdigest()[:16]
     key = f"{edition}:{chapter_id}"
 
     cached = book["ai"].get(key)
@@ -385,7 +403,7 @@ async def ai_chapter(request: Request) -> dict[str, Any]:
 
     ai_quota(book, "chapter", request)
     try:
-        text = await ai.chapter(title, pairs, gender, portrait, caption)  # type: ignore[union-attr]
+        text = await ai.chapter(title, pairs, gender, portrait, captions)  # type: ignore[union-attr]
     except AIBusy:
         raise HTTPException(status_code=503, detail="ai_busy") from None
     except AIError:

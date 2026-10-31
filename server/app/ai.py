@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 
 import httpx
 
@@ -54,19 +55,45 @@ FOLLOWUP_SYSTEM = """Ты помогаешь человеку вспомнить
 Ответь строго JSON: {{"questions": ["…", "…"]}}"""
 
 
-PHOTO_MARK = "[ФОТО]"
+PHOTO_MARK = re.compile(r"^\[ФОТО(?:\s*(\d+))?\]$")
+CAPTION_ECHO = re.compile(r"^[—–-]?\s*[«\"](.+?)[»\"]\s*$")
 
 
-def place_photo_mark(text: str, has_photo: bool) -> str:
-    """Оставляем ровно одну метку фото отдельным абзацем (или ни одной, если фото нет)."""
-    paragraphs = [p.strip() for p in text.replace(PHOTO_MARK, f"\n\n{PHOTO_MARK}\n\n").split("\n\n") if p.strip()]
-    marks = [i for i, p in enumerate(paragraphs) if p == PHOTO_MARK]
-    body = [p for p in paragraphs if p != PHOTO_MARK]
-    if not has_photo or not body:
+def place_photo_marks(text: str, count: int, captions: list[str] | None = None) -> str:
+    """Ровно по одной метке [ФОТО n] на каждое фото главы, отдельными абзацами.
+
+    Метки, которые ИИ поставил, сохраняем на своих местах; пропущенные распределяем
+    равномерно по главе; лишние и повторы убираем.
+    """
+    raw = re.sub(r"\[ФОТО(?:\s*\d+)?\]", lambda m: f"\n\n{m.group(0)}\n\n", text)
+    # ИИ иногда повторяет подпись рядом с меткой («— «Наша свадьба»») — такие строки убираем.
+    known = {c.strip().lower() for c in captions or []}
+    paragraphs = [
+        p.strip()
+        for p in raw.split("\n\n")
+        if p.strip() and not ((m := CAPTION_ECHO.match(p.strip())) and m.group(1).strip().lower() in known)
+    ]
+    body: list[str] = []
+    after: dict[int, int] = {}  # номер фото -> после скольких абзацев текста
+    for p in paragraphs:
+        match = PHOTO_MARK.match(p)
+        if not match:
+            body.append(p)
+            continue
+        number = int(match.group(1) or 1)
+        if 1 <= number <= count and number not in after:
+            after[number] = len(body)
+    if not count or not body:
         return "\n\n".join(body)
-    position = sum(1 for p in paragraphs[: marks[0]] if p != PHOTO_MARK) if marks else 1
-    body.insert(max(1, min(position, len(body))), PHOTO_MARK)
-    return "\n\n".join(body)
+    for number in range(1, count + 1):
+        if number not in after:
+            after[number] = max(1, round(len(body) * number / (count + 1)))
+        after[number] = max(1, min(after[number], len(body)))
+    out: list[str] = []
+    for i, p in enumerate(body, start=1):
+        out.append(p)
+        out.extend(f"[ФОТО {n}]" for n in sorted(after, key=lambda k: (after[k], k)) if after[n] == i)
+    return "\n\n".join(out)
 
 
 class AIClient:
@@ -129,19 +156,21 @@ class AIClient:
             raise AIError("retries exhausted")
 
     async def chapter(
-        self, title: str, pairs: list[tuple[str, str]], gender: str, portrait: str, photo: str | None = None
+        self, title: str, pairs: list[tuple[str, str]], gender: str, portrait: str, photos: list[str] | None = None
     ) -> str:
         gender_text = "женский" if gender == "f" else "мужской"
         material = "\n\n".join(f"— {q}\n{a}" for q, a in pairs)
-        # Вёрстка: ИИ выбирает место для фотографии главы по смыслу подписи.
-        layout = (
-            f"\n\nК главе приложена фотография с подписью «{photo}». Поставь отдельной строкой метку {PHOTO_MARK} "
-            "между абзацами — сразу после абзаца, к которому фотография подходит по смыслу. Метка одна. "
-            "Не ставь её перед первым абзацем; если подходящего места нет — после первого абзаца. "
-            "Подпись в текст не вставляй."
-            if photo
-            else ""
-        )
+        photos = photos or []
+        # Вёрстка: ИИ расставляет фотографии главы по смыслу подписей.
+        layout = ""
+        if photos:
+            listed = "\n".join(f"[ФОТО {i}] — «{c}»" for i, c in enumerate(photos, start=1))
+            layout = (
+                f"\n\nК главе приложены фотографии:\n{listed}\n"
+                "Поставь каждую метку отдельной строкой между абзацами — сразу после абзаца, к которому фото подходит по смыслу. "
+                "Каждая метка ровно один раз, не перед первым абзацем, по возможности не две подряд. "
+                "Строка с меткой содержит только саму метку, например [ФОТО 1] — без подписи и без тире. Подписи в текст не вставляй."
+            )
         messages = [
             {"role": "system", "content": CHAPTER_SYSTEM.format(gender=gender_text)},
             {
@@ -153,7 +182,7 @@ class AIClient:
             },
         ]
         text = await self._complete(messages, max_tokens=6000, model=self._chapter_model, temperature=0.4)
-        return place_photo_mark(text.strip().strip("«»\""), bool(photo))
+        return place_photo_marks(text.strip().strip("«»\""), len(photos), photos)
 
     async def followups(self, question: str, answer: str, gender: str) -> list[str]:
         gender_text = "женский" if gender == "f" else "мужской"
