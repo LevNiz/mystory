@@ -22,18 +22,29 @@ class AIError(Exception):
     pass
 
 
-CHAPTER_SYSTEM = """Ты — бережный литературный редактор автобиографий.
-Тебе дают ответы автора на вопросы одной главы его книги. Преврати их в связный текст главы от первого лица.
+CHAPTER_SYSTEM = """Ты — писатель-биограф. По материалам интервью ты пишешь главу автобиографии от первого лица.
+Это должна быть глава книги, а не пересказ интервью: читатель не должен догадываться, что были вопросы.
 
-Строгие правила:
-- Используй ТОЛЬКО факты из ответов. Не добавляй имена, даты, места, события, людей, чувства и детали, которых нет в ответах.
-- Не делай выводов и оценок, которых автор сам не сделал: никаких «это было важно для меня», «это меня изменило», если он так не сказал. Не морализируй, не добавляй итогов в конце.
-- Не пересказывай вопросы («Если бы мне пришлось описать себя…») — начинай сразу с сути ответа.
-- Сохраняй голос автора: его слова, интонацию, характерные фразы. Исправляй только ошибки и повторы.
-- Можно менять порядок, добавлять короткие связки между историями, объединять ответы в абзацы.
-- Если ответов мало — текст получится коротким. Это нормально, не растягивай.
-- Род автора: {gender}. Пиши на русском.
-- Без заголовков, без markdown, без списков, без кавычек вокруг всего текста. Абзацы разделяй пустой строкой."""
+Как писать:
+- Не иди по порядку вопросов. Найди общую нить главы и выстрой текст по времени или по смыслу: одна история вытекает из другой.
+- Начни со сцены, детали или образа из ответов — не с общих слов и не с «я родился», если глава не об этом.
+- Никогда не повторяй формулировки вопросов и не используй обороты вроде «если говорить о…», «что касается…», «когда меня спрашивают…», «можно сказать, что…».
+- Соединяй истории переходами — «тогда же», «спустя годы», «это я понял позже» — но только если связь есть в ответах.
+- Передай характер автора: его интонацию, словечки, юмор, то, что для него важно. Для этого тебе дан портрет автора — опирайся на него, чтобы глава звучала его голосом.
+- Пиши живым разговорным литературным языком, без канцелярита и пафоса. Предложения разной длины.
+
+Жёсткие ограничения по фактам — важнее красоты текста:
+- Разрешено: менять порядок, объединять ответы, добавлять короткие связки, править стиль, развернуть чувство или оценку, которую автор назвал сам.
+- Запрещено добавлять любые новые конкретные детали: предметы, действия, жесты, погоду, обстановку, звуки, мысли, реплики, имена, даты, места, людей.
+- Запрещено придумывать причины и следствия: если автор не сказал, что одно привело к другому, не связывай их причинно.
+- Не делай выводов и оценок за автора, не добавляй морали и итогов в конце главы.
+- Факты из портрета используй, только если они прямо относятся к теме главы; не пересказывай портрет.
+- Не вычисляй возраст и годы, не уточняй то, что автор оставил неопределённым.
+- Только русские слова, без вставок на других языках.
+- Перед ответом проверь каждое предложение: есть ли его содержание в материалах? Если нет — убери или перепиши.
+
+Объём: примерно как сумма ответов, не больше чем на треть длиннее. Если материала мало — короткая глава в 1–3 абзаца, без воды.
+Род автора: {gender}. Язык — русский. Без заголовков, markdown, списков и кавычек вокруг текста. Абзацы разделяй пустой строкой."""
 
 FOLLOWUP_SYSTEM = """Ты помогаешь человеку вспомнить детали для автобиографии.
 Тебе дают вопрос и ответ. Задай 1–2 коротких уточняющих вопроса, которые помогут раскрыть именно эту историю:
@@ -44,10 +55,14 @@ FOLLOWUP_SYSTEM = """Ты помогаешь человеку вспомнить
 
 
 class AIClient:
-    def __init__(self, base_url: str, api_key: str, model: str, timeout: float, max_concurrent: int) -> None:
+    def __init__(
+        self, base_url: str, api_key: str, model: str, chapter_model: str, timeout: float, max_concurrent: int
+    ) -> None:
         self._url = f"{base_url}/chat/completions"
         self._headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         self._model = model
+        # Главы пишет более сильная модель, уточняющие вопросы — быстрая и дешёвая.
+        self._chapter_model = chapter_model or model
         self._timeout = timeout
         self._slots = asyncio.Semaphore(max_concurrent)
         self._http = httpx.AsyncClient(timeout=timeout)
@@ -55,15 +70,22 @@ class AIClient:
     async def close(self) -> None:
         await self._http.aclose()
 
-    async def _complete(self, messages: list[dict[str, str]], max_tokens: int, json_mode: bool = False) -> str:
+    async def _complete(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        json_mode: bool = False,
+        model: str | None = None,
+        temperature: float = 0.4,
+    ) -> str:
         if self._slots.locked():
             raise AIBusy()
         async with self._slots:
             payload: dict[str, object] = {
-                "model": self._model,
+                "model": model or self._model,
                 "messages": messages,
                 "max_tokens": max_tokens,
-                "temperature": 0.4,
+                "temperature": temperature,
             }
             if json_mode:
                 payload["response_format"] = {"type": "json_object"}
@@ -86,15 +108,20 @@ class AIClient:
                 return content.strip()
             raise AIError("retries exhausted")
 
-    async def chapter(self, title: str, pairs: list[tuple[str, str]], gender: str, author: str) -> str:
+    async def chapter(self, title: str, pairs: list[tuple[str, str]], gender: str, portrait: str) -> str:
         gender_text = "женский" if gender == "f" else "мужской"
-        blocks = "\n\n".join(f"Вопрос: {q}\nОтвет: {a}" for q, a in pairs)
-        intro = f"Автор: {author}\n" if author else ""
+        material = "\n\n".join(f"— {q}\n{a}" for q, a in pairs)
         messages = [
             {"role": "system", "content": CHAPTER_SYSTEM.format(gender=gender_text)},
-            {"role": "user", "content": f"{intro}Глава: «{title}»\n\n{blocks}"},
+            {
+                "role": "user",
+                "content": (
+                    f"Портрет автора (для голоса и связок):\n{portrait or 'нет данных'}\n\n"
+                    f"Глава: «{title}»\n\nМатериалы интервью:\n\n{material}"
+                ),
+            },
         ]
-        text = await self._complete(messages, max_tokens=2200)
+        text = await self._complete(messages, max_tokens=3500, model=self._chapter_model, temperature=0.4)
         return text.strip().strip("«»\"")
 
     async def followups(self, question: str, answer: str, gender: str) -> list[str]:

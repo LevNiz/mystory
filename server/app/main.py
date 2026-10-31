@@ -88,6 +88,7 @@ async def lifespan(_: FastAPI):
             settings.ai_base_url,
             settings.ai_api_key,
             settings.ai_model,
+            settings.ai_chapter_model,
             settings.ai_timeout,
             settings.ai_max_concurrent,
         )
@@ -323,6 +324,30 @@ def chapter_pairs(book: dict[str, Any], edition: str, chapter_id: str) -> tuple[
     return gendered(chapter.title, gender), pairs, gender
 
 
+# Ответы, по которым видно характер человека: как он представляется, три слова о себе,
+# история, которую он рассказывает о себе, и глава «Какой я на самом деле».
+PORTRAIT_QUESTIONS = ("f1", "f2", "f3", "self-1", "self-2", "self-5", "self-10")
+
+
+def author_portrait(book: dict[str, Any]) -> str:
+    data = book["data"]
+    profile = data.get("profile") or {}
+    gender = profile.get("gender", "m")
+    lines = []
+    if profile.get("name"):
+        lines.append(f"Имя: {str(profile['name'])[:80]}")
+    born, city = str(profile.get("born") or "")[:4], str(profile.get("city") or "")[:80]
+    if born or city:
+        lines.append(gendered("{Родился|Родилась}: ", gender) + ", ".join(x for x in (f"{born} год" if born else "", city) if x))
+    answers = data.get("answers") or {}
+    for qid in PORTRAIT_QUESTIONS:
+        text = str((answers.get(qid) or {}).get("text") or "").strip()
+        question = content.questions.get(qid)
+        if text and question:
+            lines.append(f"{gendered(question.title, gender)} — {text[:600]}")
+    return "\n".join(lines)[:3000]
+
+
 @app.post("/api/ai/chapter")
 async def ai_chapter(request: Request) -> dict[str, Any]:
     book = require_book(request)
@@ -337,7 +362,8 @@ async def ai_chapter(request: Request) -> dict[str, Any]:
     title, pairs, gender = chapter_pairs(book, edition, chapter_id)
     if not pairs:
         raise HTTPException(status_code=400, detail="no_answers")
-    source = hashlib.sha256(json.dumps([pairs, gender], ensure_ascii=False).encode()).hexdigest()[:16]
+    portrait = author_portrait(book)
+    source = hashlib.sha256(json.dumps([pairs, gender, portrait], ensure_ascii=False).encode()).hexdigest()[:16]
     key = f"{edition}:{chapter_id}"
 
     cached = book["ai"].get(key)
@@ -345,9 +371,8 @@ async def ai_chapter(request: Request) -> dict[str, Any]:
         return cached
 
     ai_quota(book, "chapter", request)
-    author = str((book["data"].get("profile") or {}).get("name") or "")[:80]
     try:
-        text = await ai.chapter(title, pairs, gender, author)  # type: ignore[union-attr]
+        text = await ai.chapter(title, pairs, gender, portrait)  # type: ignore[union-attr]
     except AIBusy:
         raise HTTPException(status_code=503, detail="ai_busy") from None
     except AIError:

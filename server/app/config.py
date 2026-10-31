@@ -25,6 +25,7 @@ class Settings:
     ai_base_url: str
     ai_api_key: str
     ai_model: str
+    ai_chapter_model: str
     ai_timeout: float
     ai_max_concurrent: int
 
@@ -59,6 +60,8 @@ def load_settings() -> Settings:
         ai_base_url=_env("AI_BASE_URL").rstrip("/"),
         ai_api_key=_env("AI_API_KEY"),
         ai_model=_env("MYSTORY_AI_MODEL") or _env("AI_MODEL", "gpt-4o-mini"),
+        # Главы книги — отдельная, более сильная модель (литературный текст).
+        ai_chapter_model=_env("MYSTORY_AI_CHAPTER_MODEL", "claude-sonnet-4-6"),
         ai_timeout=float(_env("AI_TIMEOUT_SECONDS", "90") or 90),
         ai_max_concurrent=int(_env("AI_MAX_CONCURRENT", "4") or 4),
         urlpay_api_key=_env("URLPAY_API_KEY"),

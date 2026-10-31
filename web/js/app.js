@@ -10,7 +10,7 @@
   // Статус оплаты знает только сервер.
 
   const emptyData = () => ({
-    profile: { name: '', gender: 'm', email: '' },
+    profile: { name: '', gender: 'm', email: '', born: '', city: '' },
     answers: {},
     book: { title: '', dedication: '', style: 'answers', aiSig: {} },
     last: null,
@@ -200,6 +200,11 @@
 
   const freeDone = () => answered('free') === total('free');
 
+  // Сколько глав и вопросов в полной книге — считаем из данных, чтобы тексты не расходились с вопросами.
+  const FULL_CHAPTERS = TRACKS.full.length;
+  const FULL_QUESTIONS = TRACKS.full.reduce((n, c) => n + c.questions.length, 0);
+  const fullSize = (sep = ' и ') => `${FULL_CHAPTERS} ${plural(FULL_CHAPTERS, 'глава', 'главы', 'глав')}${sep}${FULL_QUESTIONS} ${plural(FULL_QUESTIONS, 'вопрос', 'вопроса', 'вопросов')}`;
+
   // ---------- Лендинг ----------
 
   function renderLanding() {
@@ -262,8 +267,8 @@
 
     <section class="stats" aria-label="Коротко">
       <div><strong>12</strong><span>вопросов бесплатно</span></div>
-      <div><strong>94</strong><span>вопроса в полной книге</span></div>
-      <div><strong>10</strong><span>глав жизни</span></div>
+      <div><strong>${FULL_QUESTIONS}</strong><span>${plural(FULL_QUESTIONS, 'вопрос', 'вопроса', 'вопросов')} в полной книге</span></div>
+      <div><strong>${FULL_CHAPTERS}</strong><span>${plural(FULL_CHAPTERS, 'глава', 'главы', 'глав')} жизни</span></div>
       <div><strong>${PRICE}</strong><span>единоразово, без подписки</span></div>
     </section>
 
@@ -273,7 +278,7 @@
       <ol class="path">
         <li><span>1</span><h3>Ответь на 12 вопросов</h3><p>Знакомство, детство, люди, повороты и настоящее. Голосом или текстом.</p></li>
         <li><span>2</span><h3>Прочитай свою историю</h3><p>ИИ бережно соберёт ответы в связный текст — твоими словами.</p></li>
-        <li><span>3</span><h3>Продолжи полную книгу</h3><p>10 глав и 94 вопроса в своём темпе. Ответы сохраняются.</p></li>
+        <li><span>3</span><h3>Продолжи полную книгу</h3><p>${fullSize()} в своём темпе. Ответы сохраняются.</p></li>
         <li><span>4</span><h3>Отредактируй и скачай</h3><p>Выбери истории, добавь фото и посвящение — и получи PDF.</p></li>
       </ol>
       <div class="principles">
@@ -286,7 +291,7 @@
 
     <section class="section" id="chapters">
       <p class="eyebrow">Полная книга</p>
-      <h2>10 глав — вся жизнь</h2>
+      <h2>${FULL_CHAPTERS} ${plural(FULL_CHAPTERS, 'глава', 'главы', 'глав')} — вся жизнь</h2>
       <div class="chapter-grid">
         ${TRACKS.full.map((c, i) => `
           <div class="chapter-card">
@@ -319,7 +324,7 @@
           <p class="plan__price">${priceHtml()}<span>без подписки</span></p>
           ${promoNote()}
           <ul class="checks">
-            <li>${icon.check} 10 глав и 94 вопроса</li>
+            <li>${icon.check} ${fullSize()}</li>
             <li>${icon.check} Уточняющие вопросы для важных историй</li>
             <li>${icon.check} Редактирование текста и выбор историй</li>
             <li>${icon.check} Фотографии с подписями</li>
@@ -352,10 +357,10 @@
 
   // Тексты FAQ дублируются в разметке JSON-LD в index.html — меняй в обоих местах.
   const FAQ = [
-    ['Сколько времени займёт?', 'Бесплатная часть — 12 вопросов, обычно 15–30 минут. Полная книга — 94 вопроса, её удобно проходить за несколько вечеров: прогресс сохраняется.'],
+    ['Сколько времени займёт?', 'Бесплатная часть — 12 вопросов, обычно 15–30 минут. Полная книга — больше сотни вопросов, её удобно проходить за несколько вечеров: прогресс сохраняется.'],
     ['ИИ не перепишет мою жизнь?', 'Нет. ИИ только связывает твои ответы в текст и правит повторы. Он не добавляет фактов, имён и событий, которых ты не называл. Любой абзац можно отредактировать вручную.'],
     ['Можно ли пропустить вопрос?', 'Да, любой. Пустые вопросы просто не попадут в книгу. Вернуться к ним можно в любой момент.'],
-    ['Как оплачивается полная книга?', 'Один раз, без подписки. После оплаты открываются все 10 глав, фото, посвящение и полная PDF-книга. Ответы бесплатной части тоже войдут в неё.'],
+    ['Как оплачивается полная книга?', 'Один раз, без подписки. После оплаты открываются все главы, фото, посвящение и полная PDF-книга. Ответы бесплатной части тоже войдут в неё.'],
     ['Где хранятся мои ответы?', 'На нашем сервере, привязанные к твоему браузеру. Для продолжения на другом устройстве есть личная ссылка. Мы не публикуем и не продаём твои истории.'],
     ['Можно ли подарить книгу?', 'Да — пройди интервью вместе с родителями или близкими: отвечать можно голосом, а PDF легко распечатать.'],
   ];
@@ -374,7 +379,7 @@
         <p class="offer__text">Ответь на дополнительные вопросы и создай полную книгу своей жизни.</p>
         <div class="offer__grid">
           <ul class="checks">
-            <li>${icon.check} 10 глав и 94 вопроса</li>
+            <li>${icon.check} ${fullSize()}</li>
             <li>${icon.check} Уточняющие вопросы для важных историй</li>
             <li>${icon.check} Редактирование перед финальной сборкой</li>
             <li>${icon.check} Фотографии с подписями</li>
@@ -571,7 +576,7 @@
           </nav>
           ${t === 'free' ? `
             <a class="side__upsell" href="${server.paid ? '#/full' : '#/offer'}">
-              <strong>Полная книга</strong><span>10 глав · 94 вопроса${server.paid ? '' : ` · ${PRICE}`}</span>
+              <strong>Полная книга</strong><span>${fullSize(' · ')}${server.paid ? '' : ` · ${PRICE}`}</span>
             </a>` : `
             <a class="side__upsell side__upsell--plain" href="#/free/0/0"><strong>Моя история</strong><span>12 первых вопросов · ${answered('free')}/12</span></a>`}
         </aside>
@@ -623,6 +628,10 @@
     const p = state.profile;
     return `<div class="form">
       <label>Имя для обложки книги<input id="p-name" value="${esc(p.name)}" placeholder="Имя и фамилия" autocomplete="name"></label>
+      <div class="form__row">
+        <label>Год рождения<input id="p-born" value="${esc(p.born || '')}" inputmode="numeric" maxlength="4" placeholder="1968"></label>
+        <label>Где ты ${g('{родился|родилась}')}<input id="p-city" value="${esc(p.city || '')}" placeholder="Город или село"></label>
+      </div>
       <fieldset class="seg"><legend>Как обращаться к тебе в вопросах и книге?</legend>
         <button type="button" data-gender="m" class="${p.gender !== 'f' ? 'is-on' : ''}" aria-pressed="${p.gender !== 'f'}">Он</button>
         <button type="button" data-gender="f" class="${p.gender === 'f' ? 'is-on' : ''}" aria-pressed="${p.gender === 'f'}">Она</button>
@@ -657,6 +666,10 @@
     const answer = () => (state.answers[q.id] ||= { text: '' });
 
     // Знакомство
+    ['born', 'city'].forEach((k) => {
+      const el = document.getElementById(`p-${k}`);
+      if (el) el.addEventListener('input', () => { state.profile[k] = k === 'born' ? el.value.replace(/\D/g, '') : el.value; save(); });
+    });
     const nameInput = document.getElementById('p-name');
     if (nameInput) {
       nameInput.addEventListener('input', () => { state.profile.name = nameInput.value; save(); });
@@ -829,7 +842,7 @@
   // ---------- Книга ----------
 
   // Состав книги: бесплатная — 5 разделов из 12 вопросов;
-  // полная — «Знакомство» + 10 глав, куда вливаются и ответы бесплатной части.
+  // полная — «Знакомство» + главы полной книги, куда вливаются и ответы бесплатной части.
   function bookChapters(s, full, photos = {}) {
     const freeQs = TRACKS.free.flatMap((c) => c.questions);
     const items = (qs) => qs.filter((q) => isAnswered(q, s) && (s.answers[q.id] || {}).text).map((q) => ({ q, a: s.answers[q.id] }));
@@ -853,6 +866,7 @@
     const literary = s.book.style === 'ai';
     const title = s.book.title.trim() || defaultTitle(full);
     const author = s.profile.name.trim();
+    const origin = [s.profile.born, (s.profile.city || '').trim()].filter(Boolean).join(' · ');
     const dedication = full ? s.book.dedication.trim() : '';
     const chapters = bookChapters(s, full, opts.photos)
       .map((x) => ({ ...x, all: x.items, items: x.items.filter((it) => !it.a.excluded) }))
@@ -876,6 +890,7 @@
           <h1>${esc(title)}</h1>
           <span class="bk-cover__rule"></span>
           <p class="bk-cover__years">${esc(author)}</p>
+          ${origin ? `<p class="bk-cover__origin">${esc(origin)}</p>` : ''}
           <p class="bk-cover__brand">Книга моей жизни</p>
         </div>
       </section>
@@ -1044,7 +1059,7 @@
       <p>Впереди ещё много глав: люди, которые тебя изменили, решения, о которых ты не жалеешь, ошибки, которым ты ${g('{научился|научилась}')}, и моменты, которые хочется сохранить.</p>
       <div class="upsell__row">
         <a class="btn btn--dark btn--lg" href="${example ? '#/free' : server.paid ? '#/full' : '#/offer'}">${example ? 'Начать бесплатно' : `Полная книга — ${PRICE}`} ${icon.arrow}</a>
-        <span>${example ? '12 вопросов · без регистрации' : 'Единоразово, без подписки. 10 глав · 94 вопроса'}</span>
+        <span>${example ? '12 вопросов · без регистрации' : `Единоразово, без подписки. ${fullSize(' · ')}`}</span>
       </div>
     </section>`;
   }
