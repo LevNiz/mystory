@@ -54,6 +54,21 @@ FOLLOWUP_SYSTEM = """Ты помогаешь человеку вспомнить
 Ответь строго JSON: {{"questions": ["…", "…"]}}"""
 
 
+PHOTO_MARK = "[ФОТО]"
+
+
+def place_photo_mark(text: str, has_photo: bool) -> str:
+    """Оставляем ровно одну метку фото отдельным абзацем (или ни одной, если фото нет)."""
+    paragraphs = [p.strip() for p in text.replace(PHOTO_MARK, f"\n\n{PHOTO_MARK}\n\n").split("\n\n") if p.strip()]
+    marks = [i for i, p in enumerate(paragraphs) if p == PHOTO_MARK]
+    body = [p for p in paragraphs if p != PHOTO_MARK]
+    if not has_photo or not body:
+        return "\n\n".join(body)
+    position = sum(1 for p in paragraphs[: marks[0]] if p != PHOTO_MARK) if marks else 1
+    body.insert(max(1, min(position, len(body))), PHOTO_MARK)
+    return "\n\n".join(body)
+
+
 class AIClient:
     def __init__(
         self, base_url: str, api_key: str, model: str, chapter_model: str, timeout: float, max_concurrent: int
@@ -92,7 +107,7 @@ class AIClient:
             for attempt in range(3):
                 try:
                     resp = await self._http.post(self._url, headers=self._headers, json=payload)
-                except httpx.HTTPError as exc:
+                except (httpx.HTTPError, OSError) as exc:  # OSError покрывает ssl.SSLError при обрыве TLS
                     log.warning("ai_http_error attempt=%s error=%s", attempt, exc)
                     await asyncio.sleep(1 + attempt)
                     continue
@@ -103,26 +118,42 @@ class AIClient:
                 if not resp.is_success:
                     log.error("ai_failed status=%s body=%s", resp.status_code, resp.text[:300])
                     raise AIError(f"status {resp.status_code}")
-                data = resp.json()
+                try:
+                    data = resp.json()
+                except ValueError:
+                    log.warning("ai_bad_json attempt=%s", attempt)
+                    await asyncio.sleep(1 + attempt)
+                    continue
                 content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
                 return content.strip()
             raise AIError("retries exhausted")
 
-    async def chapter(self, title: str, pairs: list[tuple[str, str]], gender: str, portrait: str) -> str:
+    async def chapter(
+        self, title: str, pairs: list[tuple[str, str]], gender: str, portrait: str, photo: str | None = None
+    ) -> str:
         gender_text = "женский" if gender == "f" else "мужской"
         material = "\n\n".join(f"— {q}\n{a}" for q, a in pairs)
+        # Вёрстка: ИИ выбирает место для фотографии главы по смыслу подписи.
+        layout = (
+            f"\n\nК главе приложена фотография с подписью «{photo}». Поставь отдельной строкой метку {PHOTO_MARK} "
+            "между абзацами — сразу после абзаца, к которому фотография подходит по смыслу. Метка одна. "
+            "Не ставь её перед первым абзацем; если подходящего места нет — после первого абзаца. "
+            "Подпись в текст не вставляй."
+            if photo
+            else ""
+        )
         messages = [
             {"role": "system", "content": CHAPTER_SYSTEM.format(gender=gender_text)},
             {
                 "role": "user",
                 "content": (
                     f"Портрет автора (для голоса и связок):\n{portrait or 'нет данных'}\n\n"
-                    f"Глава: «{title}»\n\nМатериалы интервью:\n\n{material}"
+                    f"Глава: «{title}»\n\nМатериалы интервью:\n\n{material}{layout}"
                 ),
             },
         ]
-        text = await self._complete(messages, max_tokens=3500, model=self._chapter_model, temperature=0.4)
-        return text.strip().strip("«»\"")
+        text = await self._complete(messages, max_tokens=6000, model=self._chapter_model, temperature=0.4)
+        return place_photo_mark(text.strip().strip("«»\""), bool(photo))
 
     async def followups(self, question: str, answer: str, gender: str) -> list[str]:
         gender_text = "женский" if gender == "f" else "мужской"

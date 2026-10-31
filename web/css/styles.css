@@ -743,3 +743,11 @@ kbd { font: 12px var(--sans); padding: 1px 6px; border-radius: 6px; border: 1px 
 .card .form + .answer { margin-top: 28px; }
 /* Отступ между вопросом и полем ответа (или полями знакомства) */
 .q-title + .answer, .q-title + .form { margin-top: 24px; }
+
+/* PDF: компактное содержание и фото поменьше, чтобы реже переносились на новую страницу */
+.pdf-root .bk-toc h2 { font-size: 28px; margin-bottom: 12px; }
+.pdf-root .bk-toc li { padding: 6px 0; font-size: 16px; gap: 12px; }
+.pdf-root .bk-toc li span { width: 58px; font-size: 10px; }
+.pdf-root .bk-photo { margin: 4px 0 18px; }
+.pdf-root .bk-photo img { max-height: 230px; object-fit: cover; }
+.pdf-root .bk-photo figcaption { font-size: 20px; padding-top: 6px; }

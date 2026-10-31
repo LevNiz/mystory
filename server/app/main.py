@@ -363,7 +363,9 @@ async def ai_chapter(request: Request) -> dict[str, Any]:
     if not pairs:
         raise HTTPException(status_code=400, detail="no_answers")
     portrait = author_portrait(book)
-    source = hashlib.sha256(json.dumps([pairs, gender, portrait], ensure_ascii=False).encode()).hexdigest()[:16]
+    photo = (await asyncio.to_thread(db.photos, book["id"])).get(chapter_id) if edition == "full" else None
+    caption = (photo["caption"] or "фотография к главе") if photo else None
+    source = hashlib.sha256(json.dumps([pairs, gender, portrait, caption], ensure_ascii=False).encode()).hexdigest()[:16]
     key = f"{edition}:{chapter_id}"
 
     cached = book["ai"].get(key)
@@ -372,7 +374,7 @@ async def ai_chapter(request: Request) -> dict[str, Any]:
 
     ai_quota(book, "chapter", request)
     try:
-        text = await ai.chapter(title, pairs, gender, portrait)  # type: ignore[union-attr]
+        text = await ai.chapter(title, pairs, gender, portrait, caption)  # type: ignore[union-attr]
     except AIBusy:
         raise HTTPException(status_code=503, detail="ai_busy") from None
     except AIError:

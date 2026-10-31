@@ -872,13 +872,18 @@
       .map((x) => ({ ...x, all: x.items, items: x.items.filter((it) => !it.a.excluded) }))
       .filter((x) => x.items.length || x.photo);
 
+    const PHOTO_MARK = '[ФОТО]';
+    const figure = (x) => (x.photo ? `<figure class="bk-photo"><img src="${x.photo.src}" alt="${esc(x.photo.caption || '')}">${x.photo.caption ? `<figcaption>${esc(x.photo.caption)}</figcaption>` : ''}</figure>` : '');
+    // Фото встаёт туда, где ИИ поставил метку [ФОТО]; без метки — после первого абзаца или истории.
     const body = (x) => {
       const ai = literary && aiTexts[x.key];
       if (ai && ai.text) {
         const stale = !ai.edited && (s.book.aiSig || {})[x.key] && s.book.aiSig[x.key] !== chapterSig(x, s);
-        return `${stale && opts.screen ? '<p class="bk-stale">Ответы в этой главе изменились — текст можно обновить в редакторе.</p>' : ''}${paragraphs(ai.text).map((p) => `<p>${esc(p)}</p>`).join('')}`;
+        const parts = paragraphs(ai.text);
+        if (x.photo && !parts.includes(PHOTO_MARK)) parts.splice(Math.min(1, parts.length), 0, PHOTO_MARK);
+        return `${stale && opts.screen ? '<p class="bk-stale">Ответы в этой главе изменились — текст можно обновить в редакторе.</p>' : ''}${parts.map((p) => (p === PHOTO_MARK ? figure(x) : `<p>${esc(p)}</p>`)).join('')}`;
       }
-      return x.items.map((it) => `<h3 class="bk-sub">${esc(g(it.q.title, s))}</h3>${paragraphs(it.a.text).map((p) => `<p>${esc(p)}</p>`).join('')}`).join('');
+      return x.items.map((it, i) => `<h3 class="bk-sub">${esc(g(it.q.title, s))}</h3>${paragraphs(it.a.text).filter((p) => p !== PHOTO_MARK).map((p) => `<p>${esc(p)}</p>`).join('')}${i === 0 ? figure(x) : ''}`).join('') || figure(x);
     };
 
     return {
@@ -904,7 +909,6 @@
       <section class="bk-chapter" id="ch-${x.c.id}">
         <p class="bk-chapter__num">${full ? `Глава ${i + 1}` : `Часть ${i + 1}`}</p>
         <h2>${esc(g(x.c.title, s))}</h2>
-        ${x.photo ? `<figure class="bk-photo"><img src="${x.photo.src}" alt="">${x.photo.caption ? `<figcaption>${esc(x.photo.caption)}</figcaption>` : ''}</figure>` : ''}
         ${body(x)}
       </section>`).join('')}
       ${chapters.length ? '' : `<section class="bk-empty"><p>Здесь появятся главы твоей книги.</p><a class="btn btn--dark" href="#/interview">Ответить на вопросы ${icon.arrow}</a></section>`}`,
@@ -1101,7 +1105,7 @@
             </div>`).join('')}
         </section>`;
       }).join('')}
-      <p class="editor__hint">Правки сохраняются сразу. Выключенные истории останутся в твоих ответах, но не попадут в книгу${literary ? ' — после правок пересобери текст главы' : ''}.</p>
+      <p class="editor__hint">Правки сохраняются сразу. Выключенные истории останутся в твоих ответах, но не попадут в книгу${literary ? ' — после правок пересобери текст главы. Строка [ФОТО] — место фотографии в главе, её можно перенести' : ''}.</p>
     </div>`;
   }
 
@@ -1152,22 +1156,36 @@
     await document.fonts.ready;
 
     // html2pdf клонирует элемент, поэтому смещение за экран задаём обёртке, а не самому источнику.
+    // Каждую часть книги (обложка, посвящение, содержание, главы) рисуем отдельным холстом:
+    // целая книга в один холст превышает лимиты браузера и зависает на больших книгах.
     const holder = document.createElement('div');
     holder.className = 'pdf-stage';
-    holder.innerHTML = `<div class="pdf-root">${bookMarkup(state, full, { ai: server.ai, photos: full ? server.photos : {} }).html}</div>`;
+    holder.innerHTML = bookMarkup(state, full, { ai: server.ai, photos: full ? server.photos : {} }).html;
+    const parts = [...holder.children].filter((el) => el.tagName === 'SECTION').map((section) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'pdf-root';
+      wrap.appendChild(section);
+      return wrap;
+    });
+    holder.replaceChildren(...parts);
     document.body.appendChild(holder);
 
     const base = state.book.title.trim() || defaultTitle(full);
     const fileName = `${base.replace(/[\\/:*?"<>|]/g, '')}${state.profile.name.trim() ? ` — ${state.profile.name.trim()}` : ''}.pdf`;
+    const progress = (n) => { btn.textContent = `Собираем… ${Math.round((n / parts.length) * 100)}%`; };
     try {
-      await window.html2pdf().set({
+      let worker = window.html2pdf().set({
         margin: [16, 15, 18, 15],
         filename: fileName,
-        image: { type: 'jpeg', quality: 0.92 },
+        image: { type: 'jpeg', quality: 0.9 },
         html2canvas: { scale: 2, useCORS: true, backgroundColor: '#fffdf9' },
         jsPDF: { unit: 'mm', format: 'a5', orientation: 'portrait' },
-        pagebreak: { mode: ['css', 'legacy'], before: ['.bk-dedication', '.bk-toc', '.bk-chapter'], avoid: ['.bk-photo', '.bk-sub', 'p'] },
-      }).from(holder.firstElementChild).save();
+        pagebreak: { mode: ['css', 'legacy'], avoid: ['.bk-photo', '.bk-sub', 'p'] },
+      }).from(parts[0]).toPdf();
+      parts.slice(1).forEach((part, i) => {
+        worker = worker.get('pdf').then((pdf) => { progress(i + 1); pdf.addPage(); }).from(part).toContainer().toCanvas().toPdf();
+      });
+      await worker.save();
     } catch (e) {
       toast('Не удалось собрать PDF — откроем печать, там можно выбрать «Сохранить как PDF».');
       window.print();
