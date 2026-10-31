@@ -741,3 +741,5 @@ kbd { font: 12px var(--sans); padding: 1px 6px; border-radius: 6px; border: 1px 
 
 /* Отступ между полями знакомства (имя, пол) и полем ответа */
 .card .form + .answer { margin-top: 28px; }
+/* Отступ между вопросом и полем ответа (или полями знакомства) */
+.q-title + .answer, .q-title + .form { margin-top: 24px; }
