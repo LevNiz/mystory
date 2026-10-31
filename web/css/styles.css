@@ -738,3 +738,6 @@ kbd { font: 12px var(--sans); padding: 1px 6px; border-radius: 6px; border: 1px 
 .plan__price { flex-wrap: wrap; row-gap: 2px; }
 .plan__price strong, .plan__price s, .plan__price span { white-space: nowrap; }
 .bk-cover__origin { margin-top: 6px; font: 14px var(--sans); letter-spacing: .04em; color: var(--muted); }
+
+/* Отступ между полями знакомства (имя, пол) и полем ответа */
+.card .form + .answer { margin-top: 28px; }
