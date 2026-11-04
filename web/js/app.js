@@ -375,7 +375,7 @@
     </section>
     </main>
 
-    <footer class="footer">${logo()}<nav class="footer__links"><a href="mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Восстановить доступ к книге')}">Потеряли доступ к книге?</a><a href="/privacy.html">Конфиденциальность</a><a href="/agreement.html">Соглашение</a><a href="/terms.html">Оферта</a></nav></footer>`;
+    <footer class="footer">${logo()}<nav class="footer__links"><a href="mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Восстановить доступ к книге')}">Потеряли доступ к книге?</a><a href="/privacy.html">Конфиденциальность</a><a href="/agreement.html">Пользовательское соглашение</a><a href="/terms.html">Оферта</a></nav></footer>`;
 
     const nav = document.getElementById('nav');
     const burger = document.getElementById('burger');
