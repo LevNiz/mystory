@@ -375,7 +375,7 @@
     </section>
     </main>
 
-    <footer class="footer">${logo()}<nav class="footer__links"><a href="mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Восстановить доступ к книге')}">Потеряли доступ к книге?</a><a href="/privacy.html">Конфиденциальность</a><a href="/terms.html">Оферта</a></nav></footer>`;
+    <footer class="footer">${logo()}<nav class="footer__links"><a href="mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Восстановить доступ к книге')}">Потеряли доступ к книге?</a><a href="/privacy.html">Конфиденциальность</a><a href="/agreement.html">Соглашение</a><a href="/terms.html">Оферта</a></nav></footer>`;
 
     const nav = document.getElementById('nav');
     const burger = document.getElementById('burger');
@@ -426,7 +426,7 @@
             <p class="offer__hint" id="buy-email-hint">Сюда придёт чек, и к этому адресу привяжем книгу — если потеряешь доступ, восстановим по нему.</p>
             <p class="offer__error" id="buy-error" role="alert" hidden></p>
             <button type="submit" class="btn btn--dark btn--lg btn--block" id="buy" ${server.paid ? 'disabled' : ''}>${server.paid ? 'Уже оплачено' : `Оплатить ${PRICE}`} ${icon.arrow}</button>
-            <p class="offer__legal">Нажимая «Оплатить», ты принимаешь <a href="/terms.html" target="_blank" rel="noopener">условия оферты</a> и <a href="/privacy.html" target="_blank" rel="noopener">политику конфиденциальности</a>. Чек придёт на указанный e-mail.</p>
+            <p class="offer__legal">Нажимая «Оплатить», ты принимаешь <a href="/agreement.html" target="_blank" rel="noopener">пользовательское соглашение</a>, <a href="/terms.html" target="_blank" rel="noopener">условия оферты</a> и <a href="/privacy.html" target="_blank" rel="noopener">политику конфиденциальности</a>. Чек придёт на указанный e-mail.</p>
           </form>
         </div>
       </main>

@@ -885,6 +885,7 @@ ROOT_FILES = {
     "sitemap.xml",
     "privacy.html",
     "terms.html",
+    "agreement.html",
     "favicon.svg",
     "favicon.ico",
     "apple-touch-icon.png",
