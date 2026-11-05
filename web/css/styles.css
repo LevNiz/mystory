@@ -813,3 +813,21 @@ kbd { font: 12px var(--sans); padding: 1px 6px; border-radius: 6px; border: 1px 
 .paid__mail { display: flex; gap: 10px; align-items: flex-start; margin-top: 18px; padding: 12px 14px; border-radius: var(--r-sm); background: #f3fbf7; font-size: 14px; color: var(--ink-2); }
 .paid__mail svg { flex: none; width: 20px; height: 20px; padding: 4px; border-radius: 50%; background: #2f9e6a; color: #fff; }
 .paid__mail a { color: var(--ink); text-decoration: underline; }
+
+/* ---------- Плашка cookie ---------- */
+
+.cookie {
+  position: fixed; z-index: 40; left: 20px; bottom: 20px; width: min(380px, calc(100% - 40px));
+  padding: 16px 18px; border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--surface); box-shadow: var(--shadow-lg);
+  color: var(--ink-2); font-size: 14px; line-height: 1.45; animation: rise .25s ease;
+}
+.cookie a { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
+.cookie__actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.footer__btn { padding: 0; border: 0; background: none; font-size: inherit; color: inherit; }
+.footer__btn:hover { color: var(--ink); }
+
+@media (max-width: 600px) {
+  .cookie { left: 12px; right: 12px; bottom: calc(12px + env(safe-area-inset-bottom)); width: auto; }
+}
+@media print { .cookie { display: none !important; } }
