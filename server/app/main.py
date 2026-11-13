@@ -21,7 +21,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import segno
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -34,7 +33,6 @@ from .content import Content, gendered
 from .db import Database
 from .telegram import Telegram, backup_bytes, esc as tg_esc, status_text
 from .pricing import PROMO_COOKIE, normalize_code, quote
-from .urlpay import UrlPay, verdict
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("mystory")
@@ -45,11 +43,6 @@ settings = load_settings()
 db = Database(settings.db_path)
 content = Content(settings.web_dir / "js" / "questions.js")
 FULL_QUESTIONS = sum(len(c.questions) for cid, c in content.full_chapters.items() if cid != "intro")
-urlpay = (
-    UrlPay(settings.urlpay_api_key, settings.urlpay_secret_key, settings.urlpay_shop_id)
-    if settings.payments_enabled
-    else None
-)
 ai: AIClient | None = None
 tg = Telegram(settings.tg_bot_token, db, settings.tg_admin_chats, settings.tg_link_code)
 _background: set[asyncio.Task] = set()
@@ -83,30 +76,10 @@ BOOKS_PER_IP_HOUR = 30
 BOOKS_PER_IP_DAY = 100
 STATE_SAVES_PER_BOOK_10MIN = 400
 EVENTS_PER_VISITOR_HOUR = 400
-PAYMENTS_PER_EMAIL_DAY = 5
-PAYMENTS_PER_IP_DAY = 30
 RECOVERY_PER_IP_HOUR = 60
-PAYMENTS_PER_BOOK_HOUR = 10
 
-PAYMENT_DESCRIPTION = "Полная книга моей жизни"
 CHAPTER_ID = re.compile(r"^[a-z]{2,12}$")
-EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 QUESTION_ID = re.compile(r"^[a-z0-9-]{2,20}$")
-
-
-async def payment_watcher() -> None:
-    """Раз в минуту спрашиваем UrlPay о свежих неоплаченных платежах.
-
-    Уведомления магазина уходят на адрес wgpt_bot, поэтому оплату подтверждаем сами —
-    даже если человек закрыл вкладку сразу после оплаты.
-    """
-    while True:
-        await asyncio.sleep(60)
-        try:
-            for payment in await asyncio.to_thread(db.recent_pending, 2 * DAY):
-                await check_payment(payment)
-        except Exception:  # noqa: BLE001
-            log.exception("payment_watcher_failed")
 
 
 MSK_OFFSET = 3 * 3600
@@ -163,8 +136,8 @@ async def lifespan(_: FastAPI):
             settings.ai_timeout,
             settings.ai_max_concurrent,
         )
-    log.info("start ai=%s payments=%s", bool(ai), bool(urlpay))
-    tasks = [asyncio.create_task(t) for t in (payment_watcher() if urlpay else None, monitor(), tg.poll_link()) if t]
+    log.info("start ai=%s payments=%s", bool(ai), PAYMENTS_ENABLED)
+    tasks = [asyncio.create_task(t) for t in (monitor(), tg.poll_link())]
     alert("🟢 Сервер «Книги моей жизни» запущен", "startup", 600)
     yield
     for task in tasks:
@@ -359,7 +332,7 @@ def price_quote(request: Request) -> dict[str, Any]:
 
 
 def features(request: Request) -> dict[str, Any]:
-    return {"ai": bool(ai), "payments": bool(urlpay), "fullFree": full_free(), **price_quote(request)}
+    return {"ai": bool(ai), "payments": PAYMENTS_ENABLED, "fullFree": full_free(), **price_quote(request)}
 
 
 # ---------- Книга ----------
@@ -678,63 +651,12 @@ async def ai_followup(request: Request) -> dict[str, list[str]]:
 
 
 # ---------- Оплата ----------
+# Платёжная система меняется на Lava. Пока она не подключена, оплата выключена:
+# предложение и форма остаются, а вместо счёта интерфейс показывает заглушку.
+# Подтверждать оплату будем так же, как раньше: запросом статуса в API провайдера,
+# а не по телу входящего уведомления.
 
-
-async def check_payment(payment: dict[str, Any]) -> str:
-    """Спрашиваем статус у UrlPay и, если оплачено, открываем полную книгу."""
-    if urlpay is None or not payment.get("provider_id"):
-        return "pending"
-    try:
-        remote = await urlpay.get(int(payment["provider_id"]))
-    except Exception as exc:  # noqa: BLE001 — сетевые ошибки провайдера не должны ронять запрос
-        log.warning("urlpay_check_failed uuid=%s error=%s", payment["uuid"], exc)
-        alert(f"🟠 Не удаётся проверить статус платежа в UrlPay: {tg_esc(exc)}", "urlpay_check", 1800)
-        return "pending"
-    result = verdict(
-        remote,
-        payment["uuid"],
-        int(payment["provider_id"]),
-        payment["amount"],
-        settings.urlpay_paid_statuses,
-        settings.urlpay_failed_statuses,
-    )
-    log.info(
-        "urlpay_check uuid=%s result=%s status_fields=%s",
-        payment["uuid"],
-        result,
-        {k: remote.get(k) for k in ("status", "payment_status", "state") if k in remote},
-    )
-    if result in {"paid", "failed", "mismatch"}:
-        book = await asyncio.to_thread(db.book_by_id, payment["book_id"])
-        meta = {"amount": payment["amount"], "promo": payment.get("promo")}
-        if result == "paid":
-            await asyncio.to_thread(db.set_payment_status, payment["uuid"], "paid")
-            await asyncio.to_thread(db.mark_paid, payment["book_id"])
-            # Книга привязывается к e-mail покупателя — по нему поддержка восстановит доступ.
-            if payment.get("email"):
-                await asyncio.to_thread(db.set_book_email, payment["book_id"], payment["email"])
-            await asyncio.to_thread(track, "paid", None, book, meta)
-            promo = f" · промокод {tg_esc(payment['promo'])}" if payment.get("promo") else ""
-            alert(f"💰 <b>Оплата {float(payment['amount']):.0f} ₽</b>{promo}\nкнига {payment['book_id'][:8]} · UrlPay № {payment['provider_id']}")
-        else:
-            await asyncio.to_thread(db.set_payment_status, payment["uuid"], result)
-            await asyncio.to_thread(track, "payment_failed", None, book, {**meta, "status": result})
-    return result
-
-
-def checkout(payment: dict[str, Any]) -> dict[str, Any]:
-    """Данные для нашей страницы оплаты: сумма, e-mail для чека, ссылка СБП и QR."""
-    qr_svg = None
-    if payment.get("qr_link"):
-        qr_svg = segno.make(payment["qr_link"], error="m").svg_data_uri(scale=6, border=2, dark="#16171b")
-    return {
-        "amount": payment["amount"],
-        "email": payment.get("email") or "",
-        "sbpLink": payment.get("qr_link"),
-        "qr": qr_svg,
-        "payUrl": payment.get("pay_url"),
-        "createdAt": payment["created_at"],
-    }
+PAYMENTS_ENABLED = False
 
 
 @app.post("/api/pay")
@@ -742,94 +664,7 @@ async def pay(request: Request) -> dict[str, Any]:
     book = require_book(request)
     if book["paid"]:
         return {"paid": True}
-    if urlpay is None:
-        raise HTTPException(status_code=503, detail="payments_disabled")
-    body = await read_json(request)
-    email = str(body.get("email") or "").strip().lower()
-    if len(email) > 120 or not EMAIL.match(email):
-        raise HTTPException(status_code=400, detail="bad_email")
-
-    offer = await asyncio.to_thread(price_quote, request)
-    amount = offer["price"]
-    promo_code = offer["promo"]["code"] if offer["promo"] else None
-
-    # Повторное нажатие в течение 15 минут возвращает тот же счёт, если цена и e-mail не менялись.
-    existing = await asyncio.to_thread(db.open_payment, book["id"], 15 * 60)
-    if existing and existing.get("email") == email and existing["amount"] == amount and existing.get("qr_link"):
-        return {"paid": False, "checkout": checkout(existing)}
-
-    rate(f"pay:{book['id']}", 3600, PAYMENTS_PER_BOOK_HOUR)
-    # Против спама чеками: на один e-mail и с одного IP — ограниченное число счетов в сутки.
-    rate(f"pay-email:{hashlib.sha256(email.encode()).hexdigest()[:20]}", DAY, PAYMENTS_PER_EMAIL_DAY)
-    rate(f"pay-ip:{client_ip(request)}", DAY, PAYMENTS_PER_IP_DAY)
-    payment_uuid = str(uuid_lib.uuid4())
-    try:
-        created = await urlpay.create(
-            payment_uuid,
-            amount,
-            PAYMENT_DESCRIPTION,
-            f"{settings.public_url}/pay/return",
-            email,
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.error("urlpay_create_error book=%s error=%s", book["id"], exc)
-        alert(f"🔴 Не создаётся платёж в UrlPay: {tg_esc(exc)}", "urlpay_create", 900)
-        raise HTTPException(status_code=502, detail="payment_failed") from None
-    sbp = await urlpay.sbp_link(created.url)
-    await asyncio.to_thread(
-        db.add_payment,
-        payment_uuid,
-        book["id"],
-        created.payment_id,
-        amount,
-        email,
-        created.url,
-        sbp,
-        promo_code,
-        offer["basePrice"],
-    )
-    log.info(
-        "payment_created book=%s uuid=%s provider_id=%s amount=%s promo=%s sbp=%s",
-        book["id"], payment_uuid, created.payment_id, amount, promo_code, bool(sbp),
-    )
-    track("payment_created", request, book, {"amount": amount, "promo": promo_code})
-    payment = await asyncio.to_thread(db.payment, payment_uuid)
-    return {"paid": False, "checkout": checkout(payment)}  # type: ignore[arg-type]
-
-
-@app.get("/api/pay/current")
-async def pay_current(request: Request) -> dict[str, Any]:
-    book = require_book(request)
-    if book["paid"]:
-        return {"paid": True, "checkout": None}
-    payment = await asyncio.to_thread(db.open_payment, book["id"], 60 * 60)
-    return {"paid": False, "checkout": checkout(payment) if payment and payment.get("pay_url") else None}
-
-
-@app.post("/api/pay/check")
-async def pay_check(request: Request) -> dict[str, bool]:
-    book = require_book(request)
-    if book["paid"]:
-        return {"paid": True}
-    rate(f"paycheck:{book['id']}", 60, 30)
-    for payment in await asyncio.to_thread(db.pending_payments, book["id"], 2 * DAY):
-        if await check_payment(payment) == "paid":
-            return {"paid": True}
-    return {"paid": False}
-
-
-@app.post("/webhook/urlpay")
-async def urlpay_webhook(request: Request) -> Response:
-    """Уведомление UrlPay. Телу не доверяем: берём uuid и перепроверяем платёж через API."""
-    try:
-        body = await request.json()
-        payment_uuid = str(body.get("uuid") or "")[:64]
-    except Exception:  # noqa: BLE001
-        return Response("ok")
-    payment = await asyncio.to_thread(db.payment, payment_uuid) if payment_uuid else None
-    if payment and payment["status"] == "pending":
-        await check_payment(payment)
-    return Response("ok")
+    raise HTTPException(status_code=503, detail="payments_disabled")
 
 
 @app.get("/p/{code}")
@@ -847,11 +682,6 @@ async def promo_link(code: str, request: Request) -> Response:
         )
     response.headers["X-Robots-Tag"] = "noindex"
     return response
-
-
-@app.get("/pay/return")
-async def pay_return() -> Response:
-    return RedirectResponse("/#/paid", status_code=302)
 
 
 # ---------- Админка ----------

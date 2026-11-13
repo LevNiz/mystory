@@ -716,22 +716,12 @@ kbd { font: 12px var(--sans); padding: 1px 6px; border-radius: 6px; border: 1px 
 
 .checkout { max-width: 720px; }
 .checkout h1 { margin-bottom: 24px; }
-.checkout .spinner { margin: 40px auto; }
-.checkout__grid { display: grid; grid-template-columns: 240px 1fr; gap: 32px; align-items: center; }
-.checkout__qr { margin: 0; text-align: center; }
-.checkout__qr img { display: block; width: 220px; height: 220px; margin: 0 auto 10px; padding: 10px; border-radius: var(--r); background: #fff; border: 1px solid var(--line); }
-.checkout__qr figcaption { font-size: 13px; color: var(--muted); }
-.checkout__side { display: flex; flex-direction: column; gap: 14px; }
 .checkout__lead { font-size: 17px; color: var(--ink-2); }
-.checkout__fine { font-size: 14px; color: var(--muted); }
-.checkout__status { display: flex; align-items: center; gap: 10px; margin-top: 28px; padding: 14px 16px; border-radius: var(--r-sm); background: var(--bg); font-size: 15px; color: var(--ink-2); }
-.dot-pulse { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); animation: pulse-dot 1.2s ease-in-out infinite; }
-@keyframes pulse-dot { 50% { opacity: .3; transform: scale(.7); } }
-.checkout__alt { margin-top: 14px; font-size: 14px; color: var(--muted); }
-.checkout__alt a { color: var(--ink); text-decoration: underline; }
+.checkout__fine { margin-top: 12px; font-size: 14px; color: var(--muted); }
+.checkout__actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; }
 
-@media (max-width: 760px) {
-  .checkout__grid { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 600px) {
+  .checkout__actions .btn { width: 100%; }
 }
 
 /* ---------- Промокод ---------- */

@@ -430,7 +430,7 @@ class Database:
         self._q("UPDATE books SET email = ? WHERE id = ?", (email, book_id))
 
     def find_books(self, query: str) -> list[dict[str, Any]]:
-        """Поиск для поддержки: по e-mail, номеру платежа UrlPay или началу id книги."""
+        """Поиск для поддержки: по e-mail, номеру платежа или началу id книги."""
         q = query.strip().lower()
         rows = self._q(
             """SELECT DISTINCT b.id, b.email, b.paid, b.created_at, b.last_seen FROM books b

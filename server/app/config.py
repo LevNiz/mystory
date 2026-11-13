@@ -11,10 +11,6 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
-def _codes(name: str, default: str) -> frozenset[str]:
-    return frozenset(x.strip() for x in (_env(name) or default).split(",") if x.strip())
-
-
 @dataclass(frozen=True)
 class Settings:
     public_url: str
@@ -29,12 +25,7 @@ class Settings:
     ai_timeout: float
     ai_max_concurrent: int
 
-    urlpay_api_key: str
-    urlpay_secret_key: str
-    urlpay_shop_id: int
     price_rub: str
-    urlpay_paid_statuses: frozenset[str]
-    urlpay_failed_statuses: frozenset[str]
 
     admin_path: str
     admin_password: str
@@ -47,11 +38,6 @@ class Settings:
     @property
     def ai_enabled(self) -> bool:
         return bool(self.ai_base_url and self.ai_api_key)
-
-    @property
-    def payments_enabled(self) -> bool:
-        # Без кода «оплачено» не берём деньги: подтвердить платёж было бы нечем.
-        return bool(self.urlpay_api_key and self.urlpay_secret_key and self.urlpay_shop_id and self.urlpay_paid_statuses)
 
 
 def load_settings() -> Settings:
@@ -69,14 +55,7 @@ def load_settings() -> Settings:
         ai_chapter_model=_env("MYSTORY_AI_CHAPTER_MODEL", "claude-sonnet-4-6"),
         ai_timeout=float(_env("AI_TIMEOUT_SECONDS", "90") or 90),
         ai_max_concurrent=int(_env("AI_MAX_CONCURRENT", "4") or 4),
-        urlpay_api_key=_env("URLPAY_API_KEY"),
-        urlpay_secret_key=_env("URLPAY_SECRET_KEY"),
-        urlpay_shop_id=int(_env("URLPAY_SHOP_ID", "0") or 0),
         price_rub=_env("PRICE_RUB", "1490.00"),
-        # Коды поля status из спецификации UrlPay: 0 создан, 1 в обработке, 2 отменён,
-        # 3 обработан (оплачен), 4 ошибка, 5–6 холд.
-        urlpay_paid_statuses=_codes("URLPAY_PAID_STATUSES", "3"),
-        urlpay_failed_statuses=_codes("URLPAY_FAILED_STATUSES", "2,4"),
         # Админка: скрытый адрес и пароль. Пустые — админка выключена.
         admin_path=_env("ADMIN_PATH").strip("/"),
         admin_password=_env("ADMIN_PASSWORD"),

@@ -8,7 +8,7 @@ from typing import Any
 
 PROMO_CODE = re.compile(r"^[A-Z0-9_-]{2,32}$")
 PROMO_COOKIE = "ms_promo"
-MIN_PRICE = Decimal("1.00")  # UrlPay не примет нулевой платёж
+MIN_PRICE = Decimal("1.00")  # платёжная система не примет нулевой платёж
 
 
 def money(value: Decimal) -> str:

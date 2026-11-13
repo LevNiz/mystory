@@ -391,7 +391,7 @@ def dashboard(base: str, public_url: str, data: dict[str, Any], msg: str) -> str
 </section>
 
 <section class="card"><h2>Последние платежи</h2>
-<table><thead><tr><th>Когда (МСК)</th><th>Сумма</th><th>Промокод</th><th>Статус</th><th>E-mail</th><th>UrlPay</th></tr></thead>
+<table><thead><tr><th>Когда (МСК)</th><th>Сумма</th><th>Промокод</th><th>Статус</th><th>E-mail</th><th>№ платежа</th></tr></thead>
 <tbody>{payment_rows}</tbody></table></section>
 </div>""",
     )
@@ -541,7 +541,7 @@ def find_page(base: str, query: str, results: list[dict[str, Any]]) -> str:
         f"""<div class="wrap">{admin_nav(base, "find")}
 <section class="card"><h2>Найти книгу клиента</h2>
 <form class="inline" method="get" action="{base}/find">
-  <input type="text" name="q" value="{esc(query)}" placeholder="e-mail, номер платежа UrlPay или начало номера книги" style="min-width:340px" required>
+  <input type="text" name="q" value="{esc(query)}" placeholder="e-mail, номер платежа или начало номера книги" style="min-width:340px" required>
   <button type="submit">Найти</button></form><br>{body}
 <p class="muted">E-mail привязывается к книге после оплаты. Чтобы вернуть доступ, открой книгу и выдай новую ссылку.</p></section></div>""",
     )
@@ -597,7 +597,7 @@ def book_page(base: str, data: dict[str, Any], issued: str | None = None) -> str
   <button type="submit">Выдать новую ссылку для клиента</button>
   <span class="muted">Нужна, если клиент потерял доступ. Прежняя ссылка перестанет работать.</span>
 </form></section>
-<section class="card"><h2>Платежи</h2><table><thead><tr><th>Когда</th><th>Сумма</th><th>Промокод</th><th>Статус</th><th>UrlPay</th></tr></thead><tbody>{pays}</tbody></table></section>
+<section class="card"><h2>Платежи</h2><table><thead><tr><th>Когда</th><th>Сумма</th><th>Промокод</th><th>Статус</th><th>№ платежа</th></tr></thead><tbody>{pays}</tbody></table></section>
 <section class="card"><h2>Путь пользователя</h2><table><thead><tr><th>Когда (МСК)</th><th>Действие</th><th>Детали</th></tr></thead><tbody>{timeline}</tbody></table></section>
 </div>""",
     )

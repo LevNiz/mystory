@@ -1,5 +1,5 @@
-# Сервер книги. Публичных портов нет: трафик приходит через общий nginx проекта wgpt_bot
-# по его docker-сети (имя сети задаётся в .env как EDGE_NETWORK).
+# Книга моей жизни: приложение, nginx с HTTPS и продление сертификата.
+# Первый запуск на чистом сервере — scripts/server-setup.sh, дальше — scripts/deploy.sh.
 services:
   api:
     build:
@@ -13,17 +13,36 @@ services:
       COOKIE_SECURE: "1"
     volumes:
       - mystory_data:/data
-    networks:
-      edge:
-        aliases: [mystory_api]
-    logging:
+    logging: &logs
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
 
-networks:
-  edge:
-    external: true
-    name: ${EDGE_NETWORK:-wgpt_bot_internal}
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: mystory_nginx
+    restart: unless-stopped
+    depends_on: [api]
+    ports: ["80:80", "443:443"]
+    entrypoint: ["sh", "/etc/mystory/nginx-start.sh"]
+    volumes:
+      - ./deploy:/etc/mystory:ro
+      - ./deploy/ssl-params.conf:/etc/nginx/snippets/ssl-params.conf:ro
+      - letsencrypt:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
+    logging: *logs
+
+  # Продлевает сертификат дважды в сутки (certbot сам решает, пора ли); nginx подхватывает его раз в 6 часов.
+  certbot:
+    image: certbot/certbot:v2.11.0
+    container_name: mystory_certbot
+    restart: unless-stopped
+    entrypoint: ["sh", "-c", "while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 43200; done"]
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    logging: *logs
 
 volumes:
   mystory_data:
+  letsencrypt:
+  certbot_www:

@@ -449,77 +449,44 @@
       try {
         await flush();
         if (!server.exists) await api('PUT', '/api/state', { data: state }).then(() => { server.exists = true; });
+        // Платёжная система не подключена — показываем заглушку вместо счёта.
+        if (!server.features.payments) { go('#/checkout'); return; }
         const res = await api('POST', '/api/pay', { email });
         if (res.paid) { server.paid = true; go('#/full'); return; }
-        checkoutData = res.checkout;
         go('#/checkout');
       } catch (err) {
         btn.disabled = false;
         btn.innerHTML = `Оплатить ${PRICE} ${icon.arrow}`;
         if (err.message === 'bad_email') showError('Проверь e-mail — на него придёт чек.');
-        else toast(err.message === 'payments_disabled' ? 'Оплата временно недоступна — попробуй чуть позже.' : 'Не получилось создать платёж. Попробуй ещё раз.');
+        else if (err.message === 'payments_disabled') go('#/checkout');
+        else toast('Не получилось создать платёж. Попробуй ещё раз.');
       }
     });
   }
 
-  // ---------- Оплата на нашей странице ----------
-  // Платёж создаёт сервер; здесь — ссылка СБП (на телефоне) и QR (на компьютере),
-  // а статус спрашиваем у сервера, который сверяется с UrlPay.
+  // ---------- Оплата ----------
+  // Переходим на платёжную систему Lava. Пока она не подключена, вместо счёта — заглушка:
+  // ответы и e-mail сохранены, человек может вернуться позже.
 
-  let checkoutData = null;
-  const isMobile = () => window.matchMedia('(max-width: 760px), (pointer: coarse)').matches;
-
-  async function renderCheckout() {
-    if (!server.paid) track('checkout_view');
+  function renderCheckout() {
     if (server.paid) return renderPaidDone();
+    track('checkout_view');
+    const email = state.profile.email;
     app.innerHTML = `
     <div class="offer">
       ${aura(205, 'aura--offer-a')}
       <header class="offer__bar">${logo()}<a class="btn btn--ghost btn--sm" href="#/offer">${icon.back}<span class="hide-sm">Назад</span></a></header>
-      <main class="offer__card checkout" id="checkout"><div class="spinner" aria-hidden="true"></div></main>
+      <main class="offer__card checkout">
+        <p class="eyebrow">Полная книга моей жизни</p>
+        <h1>Оплата скоро откроется</h1>
+        <p class="checkout__lead">Мы подключаем новую платёжную систему. Это займёт несколько дней — твои ответы сохранены, ничего не потеряется.</p>
+        ${email ? `<p class="checkout__fine">Твой e-mail ${esc(email)} мы запомнили для чека.</p>` : ''}
+        <div class="checkout__actions">
+          <a class="btn btn--dark btn--lg" href="${freeDone() ? '#/book' : '#/free'}">Вернуться к книге ${icon.arrow}</a>
+          <a class="btn btn--ghost btn--lg" href="mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Полная книга')}">Написать нам</a>
+        </div>
+      </main>
     </div>`;
-    if (!checkoutData) {
-      try { checkoutData = (await api('GET', '/api/pay/current')).checkout; } catch (e) { checkoutData = null; }
-    }
-    const box = document.getElementById('checkout');
-    if (!box) return;
-    if (!checkoutData) { go('#/offer'); return; }
-    const c = checkoutData;
-    const amount = `${Number(c.amount).toLocaleString('ru-RU')} ₽`;
-    const mobile = isMobile();
-    box.innerHTML = `
-      <p class="eyebrow">Полная книга моей жизни</p>
-      <h1>Оплата ${amount}</h1>
-      ${c.sbpLink ? `
-        <div class="checkout__grid">
-          ${mobile ? '' : `<figure class="checkout__qr"><img src="${c.qr}" width="220" height="220" alt="QR-код для оплаты через СБП"><figcaption>Наведи камеру телефона или открой QR в приложении банка</figcaption></figure>`}
-          <div class="checkout__side">
-            <p class="checkout__lead">${mobile ? 'Оплата через СБП — откроется приложение твоего банка.' : 'Отсканируй QR-код — оплата пройдёт через СБП в приложении банка.'}</p>
-            <a class="btn btn--dark btn--lg btn--block" href="${esc(c.sbpLink)}" rel="noopener">${mobile ? 'Оплатить в приложении банка' : 'Открыть ссылку СБП'} ${icon.arrow}</a>
-            <p class="checkout__fine">Чек придёт на ${esc(c.email)}.</p>
-          </div>
-        </div>` : `
-        <p class="checkout__lead">Платёж создан. Осталось подтвердить оплату на защищённой странице платёжного сервиса.</p>
-        <a class="btn btn--dark btn--lg" href="${esc(c.payUrl)}" rel="noopener">Перейти к оплате ${icon.arrow}</a>`}
-      <div class="checkout__status" role="status" aria-live="polite"><span class="dot-pulse" aria-hidden="true"></span><span id="pay-status">Ждём подтверждения оплаты…</span></div>
-      ${c.sbpLink ? `<p class="checkout__alt">Не получается? <a href="${esc(c.payUrl)}" rel="noopener">Оплатить на странице UrlPay</a></p>` : ''}`;
-    pollPayment('#/checkout');
-  }
-
-  function pollPayment(hash) {
-    let tries = 0;
-    const tick = async () => {
-      if (location.hash !== hash) return;
-      tries++;
-      try {
-        const res = await api('POST', '/api/pay/check');
-        if (res.paid) { server.paid = true; server.purchased = true; checkoutData = null; flush(); renderPaidDone(); return; }
-      } catch (e) { /* повторим */ }
-      const status = document.getElementById('pay-status');
-      if (status && tries > 100) status.textContent = 'Если деньги уже списались, подтверждение придёт в течение пары минут — можно обновить страницу.';
-      setTimeout(tick, tries < 60 ? 3000 : 10000);
-    };
-    tick();
   }
 
   // Экран полной версии: сразу после оплаты (first) или когда оплативший снова открывает предложение.
