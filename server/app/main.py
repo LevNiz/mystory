@@ -716,6 +716,7 @@ ROOT_FILES = {
     "privacy.html",
     "terms.html",
     "agreement.html",
+    "contacts.html",
     "favicon.svg",
     "favicon.ico",
     "apple-touch-icon.png",
